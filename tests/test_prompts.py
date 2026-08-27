@@ -18,12 +18,19 @@ from astrbot_plugin_persona_prism.prism.prompts import (
     load_builtin_specs,
 )
 
+#: key -> (命令, 标签, 是否结构化, 归一化后的布局)
 EXPECTED_BUILTIN = {
-    "portrait": ("棱镜画像", "人格画像", True),
-    "praise": ("棱镜赞赏", "群友赞赏", True),
-    "roast": ("棱镜锐评", "群友锐评", True),
-    "clone": ("棱镜克隆", "人格克隆", False),
-    "match": ("棱镜姻缘", "群友姻缘", True),
+    "portrait": ("棱镜画像", "人格画像", True, "card"),
+    "praise": ("棱镜赞赏", "群友赞赏", True, "card"),
+    "roast": ("棱镜锐评", "群友锐评", True, "card"),
+    "clone": ("棱镜克隆", "人格克隆", False, "text"),
+    "match": ("棱镜姻缘", "群友姻缘", True, "card"),
+    # 「画像」系列：兼容上游 astrbot_plugin_portrayal 的长文玩法
+    "legacy_portrait": ("画像", "画像·综合", False, "markdown"),
+    "legacy_positive": ("正画像", "画像·优势", False, "markdown"),
+    "legacy_negative": ("负画像", "画像·缺点", False, "markdown"),
+    "legacy_clone": ("克隆人格", "画像·人格克隆", False, "text"),
+    "legacy_match": ("找对象", "画像·红娘", False, "markdown"),
 }
 
 
@@ -49,11 +56,12 @@ def test_builtin_prompt_file_exists() -> None:
 def test_load_builtin_specs_matches_expected_commands() -> None:
     specs = load_builtin_specs()
     assert set(specs) == set(EXPECTED_BUILTIN)
-    for key, (command, label, structured) in EXPECTED_BUILTIN.items():
+    for key, (command, label, structured, layout) in EXPECTED_BUILTIN.items():
         spec = specs[key]
         assert spec.command == command
         assert spec.label == label
         assert spec.structured is structured
+        assert spec.layout == layout
         assert spec.builtin is True
         assert len(spec.prompt) > 30
 
@@ -149,7 +157,24 @@ def test_label_of_falls_back_to_key() -> None:
 
 def test_spec_to_dict_roundtrip_keys() -> None:
     data = PromptSpec("k", "命令", "标签", "正文").to_dict()
-    assert set(data) == {"key", "command", "label", "prompt", "structured", "builtin", "enabled"}
+    assert set(data) == {
+        "key",
+        "command",
+        "label",
+        "prompt",
+        "structured",
+        "builtin",
+        "enabled",
+        "layout",
+    }
+
+
+def test_spec_to_dict_normalizes_missing_layout() -> None:
+    """layout 缺省时按 structured 推导，老配置不会突然换布局。"""
+    assert PromptSpec("k", "c", "l", "p").to_dict()["layout"] == "card"
+    assert PromptSpec("k", "c", "l", "p", structured=False).to_dict()["layout"] == "text"
+    assert PromptSpec("k", "c", "l", "p", layout="MarkDown ").to_dict()["layout"] == "markdown"
+    assert PromptSpec("k", "c", "l", "p", layout="ghost").to_dict()["layout"] == "card"
 
 
 # -- 装配 -------------------------------------------------------------------

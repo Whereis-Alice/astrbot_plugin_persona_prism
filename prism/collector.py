@@ -126,16 +126,23 @@ def parse_history_page(page: Iterable[Any]) -> list[dict[str, Any]]:
             continue
         sender = raw.get("sender") or {}
         text, is_reply = parse_onebot_segments(raw.get("message") or [])
-        rows.append(
-            {
-                "message_id": str(message_id),
-                "user_id": str(sender.get("user_id") or raw.get("user_id") or ""),
-                "user_name": str(sender.get("card") or sender.get("nickname") or ""),
-                "text": text,
-                "ts": int(raw.get("time") or 0),
-                "is_reply": is_reply,
-            },
-        )
+        row: dict[str, Any] = {
+            "message_id": str(message_id),
+            "user_id": str(sender.get("user_id") or raw.get("user_id") or ""),
+            "user_name": str(sender.get("card") or sender.get("nickname") or ""),
+            "text": text,
+            "ts": int(raw.get("time") or 0),
+            "is_reply": is_reply,
+        }
+        # message_seq 才是 get_group_msg_history 的正确翻页游标。
+        # go-cqhttp / NapCat / Lagrange / LLBot（幸运莉莉娅）都会返回它，而
+        # message_id 在部分实现里跟 seq 完全不是一回事，拿它当游标会翻不动页。
+        seq = raw.get("message_seq")
+        if seq in (None, ""):
+            seq = raw.get("real_seq")
+        if seq not in (None, ""):
+            row["message_seq"] = str(seq)
+        rows.append(row)
     return rows
 
 

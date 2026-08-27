@@ -118,7 +118,6 @@ def test_snapshot_covers_whole_whitelist() -> None:
 
 def test_dangerous_paths_are_not_writable_from_webui() -> None:
     for path in (
-        "persona_clone.enabled",
         "persona_clone.sync_bot_nickname",
         "persona_clone.sync_bot_avatar",
         "collect.page_size",
@@ -126,6 +125,17 @@ def test_dangerous_paths_are_not_writable_from_webui() -> None:
         "collect.max_per_group",
     ):
         assert path not in DASHBOARD_WRITABLE
+
+
+def test_persona_clone_switches_are_writable_from_webui() -> None:
+    """克隆开关允许在 WebUI 调；改机器人昵称/头像这类副作用大的仍只走配置文件。"""
+    for path in (
+        "persona_clone.enabled",
+        "persona_clone.require_admin",
+        "persona_clone.clear_history_on_switch",
+        "compat.legacy_commands",
+    ):
+        assert path in DASHBOARD_WRITABLE
 
 
 def test_whitelist_paths_all_exist_in_defaults() -> None:

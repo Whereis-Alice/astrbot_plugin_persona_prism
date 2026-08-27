@@ -158,15 +158,41 @@
         },
         "hint": "群内可用『棱镜主题 <名字>』临时切换本群主题。"
       },
+      "card_scale": {
+        "description": "卡片清晰度（%）",
+        "type": "int",
+        "default": 200,
+        "slider": {
+          "min": 100,
+          "max": 300,
+          "step": 25
+        },
+        "hint": "以百分比放大卡片像素。200 = 两倍分辨率。网络 t2i 走 CSS zoom，本地 Playwright 走 device_scale_factor，两条链路观感一致。调高会更清晰，但图更大、渲染更慢。"
+      },
+      "image_format": {
+        "description": "图片格式",
+        "type": "string",
+        "default": "jpeg",
+        "options": [
+          "jpeg",
+          "png"
+        ],
+        "labels": {
+          "jpeg": "JPEG（体积小，适合日常发群）",
+          "png": "PNG（无损，文字边缘最锐利）"
+        },
+        "hint": "PNG 无损但体积明显更大；选 PNG 时下面的图片质量不生效。"
+      },
       "image_quality": {
         "description": "图片质量",
         "type": "int",
-        "default": 85,
+        "default": 92,
         "slider": {
-          "min": 40,
+          "min": 60,
           "max": 100,
-          "step": 5
-        }
+          "step": 2
+        },
+        "hint": "仅在 JPEG 格式下生效。"
       },
       "show_evidence": {
         "description": "卡片展示原话证据",
@@ -184,6 +210,24 @@
         "description": "卡片页脚署名",
         "type": "string",
         "default": "人格棱镜 · Persona Prism"
+      },
+      "font_family": {
+        "description": "正文字体",
+        "type": "string",
+        "default": "",
+        "hint": "留空 = 沿用主题自带字体栈。可写多个字体名并用逗号分隔，例如：LXGW WenKai, Noto Sans SC。"
+      },
+      "font_title_family": {
+        "description": "标题字体",
+        "type": "string",
+        "default": "",
+        "hint": "留空 = 跟随正文字体。"
+      },
+      "font_source": {
+        "description": "自定义字体文件",
+        "type": "string",
+        "default": "",
+        "hint": "本地字体文件绝对路径或 http(s) 地址，支持 ttf/otf/woff/woff2/ttc，上限 8MB。本地文件会被读成 base64 内嵌进 HTML，这样网络 t2i 端点也能用上。"
       }
     }
   },
@@ -280,9 +324,21 @@
     "type": "object",
     "items": {
       "enabled": {
-        "description": "启用『棱镜克隆』指令",
+        "description": "启用人格克隆（『棱镜克隆』『克隆人格』『切换人格』）",
         "type": "bool",
         "default": true
+      },
+      "require_admin": {
+        "description": "人格克隆仅限管理员",
+        "type": "bool",
+        "default": true,
+        "hint": "上游的『克隆人格』对全群开放。这里默认收紧到管理员，关掉即恢复上游行为。"
+      },
+      "clear_history_on_switch": {
+        "description": "切换/恢复人格时清空当前对话上下文",
+        "type": "bool",
+        "default": true,
+        "hint": "不清空的话，新人格会带着旧人格的对话记忆说话，容易人格串味。"
       },
       "sync_bot_nickname": {
         "description": "克隆时同步修改机器人昵称",
@@ -294,7 +350,7 @@
         "description": "克隆时同步修改机器人头像",
         "type": "bool",
         "default": false,
-        "hint": "⚠️ 同上，全局生效且不可自动撤销。默认关闭。"
+        "hint": "⚠️ 同上，全局生效。本插件会先备份原头像，『恢复人格』可以还原。"
       }
     }
   },
@@ -323,6 +379,18 @@
         "type": "list",
         "default": [],
         "hint": "留空 = 所有群生效。填了则只在名单内的群响应。"
+      }
+    }
+  },
+  "compat": {
+    "description": "上游兼容",
+    "type": "object",
+    "items": {
+      "legacy_commands": {
+        "description": "启用『画像』系列指令",
+        "type": "bool",
+        "default": true,
+        "hint": "画像 / 正画像 / 负画像 / 克隆人格 / 找对象 / 查看画像 / 切换人格 / 恢复人格。若同时装了上游 astrbot_plugin_portrayal 会指令撞车，建议关掉其中一边。"
       }
     }
   }

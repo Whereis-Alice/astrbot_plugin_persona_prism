@@ -216,6 +216,10 @@ body {
   margin: 0;
 }
 
+html {
+  background-color: var(--bg);
+}
+
 body {
   background-color: var(--bg);
   background-image: var(--bg-glow-1), var(--bg-glow-2);
@@ -223,6 +227,13 @@ body {
   color: var(--text);
   font-family: var(--font-body);
   transition: background-color var(--dur-3) var(--ease-out), color var(--dur-3) var(--ease-out);
+}
+
+/* 抽屉、遮罩、主题菜单都在类规则里写了 display:flex，作者样式优先级高于浏览器
+   默认的 [hidden]{display:none}，不加这条它们会一直显示：抽屉会盖住右侧 480px，
+   遮罩还会带着 backdrop-filter 糊住整页。所以这里统一兜底。 */
+[hidden] {
+  display: none !important;
 }
 
 .sr-only {
@@ -268,6 +279,9 @@ textarea {
 .app {
   display: grid;
   grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  /* 控制台把页面放进 iframe，宽度必须显式撑满，否则窄内容会让右侧露出画布底色。 */
+  width: 100%;
+  min-width: 0;
   min-height: 100vh;
 }
 
@@ -1663,6 +1677,10 @@ textarea {
   border-left: 3px solid var(--danger);
 }
 
+.toast--warn {
+  border-left: 3px solid var(--warn);
+}
+
 .toast--info {
   border-left: 3px solid var(--accent-2);
 }
@@ -1677,6 +1695,10 @@ textarea {
 
 .toast--err .icon {
   color: var(--danger);
+}
+
+.toast--warn .icon {
+  color: var(--warn);
 }
 
 /* --- 21. 启动失败提示 ----------------------------------------------------- */
@@ -1702,6 +1724,16 @@ textarea {
 .bootfail p {
   color: var(--text-2);
   line-height: 1.7;
+}
+
+.bootfail__detail {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--border-strong);
+  background: var(--surface-2, transparent);
+  font-size: var(--step--1);
+  color: var(--text-3) !important;
+  text-align: left;
 }
 
 /* --- 22. 响应式 ----------------------------------------------------------- */

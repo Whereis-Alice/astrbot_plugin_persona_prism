@@ -27,12 +27,13 @@ def test_plugin_identity_is_renamed_everywhere():
 
 
 def test_own_commands_has_no_duplicates():
-    assert len(main.OWN_COMMANDS) == 17
-    assert len(set(main.OWN_COMMANDS)) == 17
+    assert len(main.OWN_COMMANDS) == 25
+    assert len(set(main.OWN_COMMANDS)) == 25
 
 
 def test_builtin_commands_are_a_subset_of_own_commands():
-    assert len(main.BUILTIN_COMMANDS) == 5
+    # 5 条棱镜系列 + 5 条兼容上游的画像系列
+    assert len(main.BUILTIN_COMMANDS) == 10
     assert set(main.BUILTIN_COMMANDS) <= set(main.OWN_COMMANDS)
 
 
@@ -42,10 +43,36 @@ def test_builtin_commands_match_the_prompt_library():
     assert commands == set(main.BUILTIN_COMMANDS)
 
 
+#: 「画像」系列是为兼容上游 astrbot_plugin_portrayal 特意沿用的指令名，不带棱镜前缀。
+COMPAT_COMMANDS = frozenset(main.LEGACY_KEYS) | {"查看画像", "切换人格", "恢复人格"}
+
+
 def test_every_command_shares_the_prism_prefix():
-    # 统一前缀是「不和其他插件抢指令」的关键，别人装了上游插件也不冲突。
+    # 棱镜系列统一前缀是「不和其他插件抢指令」的关键；只有兼容指令例外。
     for command in main.OWN_COMMANDS:
-        assert command.startswith("棱镜")
+        assert command.startswith("棱镜") or command in COMPAT_COMMANDS
+
+
+def test_compat_commands_are_all_registered_as_own():
+    assert set(main.OWN_COMMANDS) >= COMPAT_COMMANDS
+
+
+def test_legacy_keys_map_to_builtin_prompts():
+    library = PromptLibrary()
+    for command, key in main.LEGACY_KEYS.items():
+        spec = library.get(key)
+        assert spec is not None, key
+        assert spec.command == command
+        assert spec.builtin is True
+
+
+def test_clone_kinds_cover_both_series():
+    assert main.CLONE_KINDS == ("legacy_clone", "clone")
+
+
+def test_shared_preference_keys_are_namespaced():
+    for key in (main._SP_BOT_BACKUP, main._SP_PERSONA_BACKUP, main._PERSONA_ID_PREFIX):
+        assert key.startswith("persona_prism")
 
 
 def test_avatar_template_is_a_qq_endpoint():

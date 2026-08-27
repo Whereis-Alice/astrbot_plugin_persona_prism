@@ -8,7 +8,7 @@ import pytest
 from astrbot_plugin_persona_prism.prism import dashboard
 from astrbot_plugin_persona_prism.prism.config import DASHBOARD_WRITABLE, PrismConfig
 from astrbot_plugin_persona_prism.prism.models import CorpusMessage, PortraitRecord
-from astrbot_plugin_persona_prism.prism.prompts import PromptLibrary
+from astrbot_plugin_persona_prism.prism.prompts import VALID_LAYOUTS, PromptLibrary
 from astrbot_plugin_persona_prism.prism.store import PrismStore
 
 PLATFORM = "aiocqhttp"
@@ -373,10 +373,13 @@ def test_build_prompts_lists_builtin_and_reserved(store):
     library = PromptLibrary()
     data = dashboard.build_prompts(store, library)
     assert data["ok"] is True
-    assert len(data["builtin"]) == 5
+    # 5 条棱镜系列 + 5 条兼容上游的画像系列
+    assert len(data["builtin"]) == 10
     assert data["custom"] == []
-    assert len(data["reserved_commands"]) == 5
+    assert len(data["reserved_commands"]) == 10
     assert data["reserved_commands"] == sorted(data["reserved_commands"])
+    assert [item["value"] for item in data["layouts"]] == list(VALID_LAYOUTS)
+    assert all(entry.get("layout") in VALID_LAYOUTS for entry in data["builtin"])
 
 
 def test_build_prompts_includes_custom_entries(store):

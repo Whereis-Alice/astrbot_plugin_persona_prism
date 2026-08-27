@@ -21,7 +21,7 @@ import threading
 import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from .models import CorpusMessage, PortraitRecord
 
@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS prompt_entries (
     label       TEXT NOT NULL DEFAULT '',
     prompt      TEXT NOT NULL DEFAULT '',
     structured  INTEGER NOT NULL DEFAULT 1,
+    layout      TEXT NOT NULL DEFAULT '',
     enabled     INTEGER NOT NULL DEFAULT 1,
     updated_at  INTEGER NOT NULL DEFAULT 0
 );
@@ -143,7 +144,22 @@ class PrismStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    #: 首版之后追加的列。sqlite 的 ALTER TABLE 没有 IF NOT EXISTS，只能先探再加。
+    _MIGRATIONS: ClassVar[dict[str, tuple[tuple[str, str], ...]]] = {
+        "prompt_entries": (("layout", "TEXT NOT NULL DEFAULT ''"),),
+    }
+
+    def _migrate(self) -> None:
+        """给旧版本建好的库补上新增列。调用方需已持有 self._lock。"""
+        for table, columns in self._MIGRATIONS.items():
+            rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            existing = {str(row["name"]) for row in rows}
+            for name, ddl in columns:
+                if name not in existing:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
     # -- 基础设施 -----------------------------------------------------------
     def close(self) -> None:
@@ -869,6 +885,7 @@ class PrismStore:
                 "label": row["label"],
                 "prompt": row["prompt"],
                 "structured": bool(row["structured"]),
+                "layout": row["layout"] or "",
                 "enabled": bool(row["enabled"]),
                 "updated_at": int(row["updated_at"] or 0),
             }
@@ -883,6 +900,7 @@ class PrismStore:
         label: str,
         prompt: str,
         structured: bool = True,
+        layout: str = "",
         enabled: bool = True,
     ) -> None:
         self._write(
@@ -890,13 +908,14 @@ class PrismStore:
                 (
                     """
                     INSERT INTO prompt_entries
-                        (key, command, label, prompt, structured, enabled, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                        (key, command, label, prompt, structured, layout, enabled, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(key) DO UPDATE SET
                         command = excluded.command,
                         label = excluded.label,
                         prompt = excluded.prompt,
                         structured = excluded.structured,
+                        layout = excluded.layout,
                         enabled = excluded.enabled,
                         updated_at = excluded.updated_at
                     """,
@@ -906,6 +925,7 @@ class PrismStore:
                         label,
                         prompt,
                         1 if structured else 0,
+                        layout,
                         1 if enabled else 0,
                         _now(),
                     ),

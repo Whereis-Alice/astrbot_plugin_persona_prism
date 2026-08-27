@@ -15,6 +15,8 @@ import json
 import re
 from pathlib import Path
 
+import yaml
+
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 PAGE_DIR = PLUGIN_DIR / "pages" / "persona-prism"
 
@@ -70,12 +72,43 @@ def test_i18n_files_define_every_page_key():
             assert isinstance(node, str) and node
 
 
+BRIDGE_SDK_SRC = "/api/plugin/page/bridge-sdk.js"
+
+
 def test_index_html_only_references_local_assets():
     refs = re.findall(r'(?:src|href)="([^"#]+)"', INDEX_HTML)
     assert refs, "页面应该至少引用 style.css 与 app.js"
     for ref in refs:
+        if ref == BRIDGE_SDK_SRC:
+            # 唯一允许的外部引用：AstrBot 控制台会把它重写成带令牌的桥接 SDK 地址。
+            continue
         assert ref.startswith("./"), ref
         assert (PAGE_DIR / ref[2:]).is_file(), ref
+
+
+def test_bridge_sdk_loads_before_app_js():
+    sdk = INDEX_HTML.find(BRIDGE_SDK_SRC)
+    app = INDEX_HTML.find("./app.js")
+    assert sdk != -1, "必须显式声明桥接 SDK，否则 AstrBot 会把它注入到 app.js 之后"
+    assert app != -1
+    assert sdk < app, "桥接 SDK 必须先于 app.js 加载"
+
+
+def test_style_css_restores_hidden_attribute():
+    css = (PAGE_DIR / "style.css").read_text(encoding="utf-8")
+    normalized = re.sub(r"\s+", "", css)
+    assert "[hidden]{display:none!important" in normalized, (
+        "抽屉/遮罩/主题菜单的类规则里写了 display，会盖掉 UA 的 [hidden]"
+    )
+
+
+def test_app_js_resolves_bridge_lazily():
+    app_js = (PAGE_DIR / "app.js").read_text(encoding="utf-8")
+    assert "const bridge = window.AstrBotPluginPage" not in app_js, (
+        "桥接 SDK 可能迟到，禁止在顶层一次性求值"
+    )
+    assert "function pickBridge()" in app_js
+    assert "waitForBridge" in app_js
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +270,11 @@ def test_no_upstream_identifiers_leak_into_code():
 
 
 def test_metadata_declares_the_new_identity():
-    meta = (PLUGIN_DIR / "metadata.yaml").read_text(encoding="utf-8")
-    assert "astrbot_plugin_persona_prism" in meta
-    assert "portrayal" not in meta
+    meta = yaml.safe_load((PLUGIN_DIR / "metadata.yaml").read_text(encoding="utf-8"))
+    assert meta["name"] == "astrbot_plugin_persona_prism"
+    assert meta["repo"].endswith("astrbot_plugin_persona_prism")
+    assert str(meta["version"]).startswith("v")
     assert "astrbot_version" in meta
+    # 标识字段里不能残留上游名字；desc 里提到上游是「兼容说明」，允许。
+    for field in ("name", "repo", "display_name", "author"):
+        assert "portrayal" not in str(meta[field]).lower(), field

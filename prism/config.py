@@ -33,10 +33,15 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     "render": {
         "backend": "auto",
         "theme": "aurora",
-        "image_quality": 85,
+        "card_scale": 200,
+        "image_format": "jpeg",
+        "image_quality": 92,
         "show_evidence": True,
         "show_avatar": True,
         "footer_note": "人格棱镜 · Persona Prism",
+        "font_family": "",
+        "font_title_family": "",
+        "font_source": "",
     },
     "limits": {
         "user_cooldown_sec": 60,
@@ -66,6 +71,11 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "enabled": True,
         "sync_bot_nickname": False,
         "sync_bot_avatar": False,
+        "require_admin": True,
+        "clear_history_on_switch": True,
+    },
+    "compat": {
+        "legacy_commands": True,
     },
     "behavior": {
         "quiet_progress": False,
@@ -93,10 +103,15 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "collect.fold_repeats",
         "render.backend",
         "render.theme",
+        "render.card_scale",
+        "render.image_format",
         "render.image_quality",
         "render.show_evidence",
         "render.show_avatar",
         "render.footer_note",
+        "render.font_family",
+        "render.font_title_family",
+        "render.font_source",
         "limits.user_cooldown_sec",
         "limits.target_cooldown_sec",
         "limits.group_daily_quota",
@@ -112,16 +127,22 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "behavior.history_limit",
         "behavior.allow_self_only",
         "behavior.enabled_groups",
+        "persona_clone.enabled",
+        "persona_clone.require_admin",
+        "persona_clone.clear_history_on_switch",
+        "compat.legacy_commands",
     },
 )
 
 VALID_THEMES = ("aurora", "ink", "neon", "paper", "dossier")
 VALID_BACKENDS = ("auto", "local_first", "t2i_only", "text_only")
 VALID_SAMPLING = ("layered", "recent")
+VALID_IMAGE_FORMATS = ("jpeg", "png")
 
 _ENUMS: dict[str, tuple[str, ...]] = {
     "render.theme": VALID_THEMES,
     "render.backend": VALID_BACKENDS,
+    "render.image_format": VALID_IMAGE_FORMATS,
     "collect.sampling": VALID_SAMPLING,
 }
 
@@ -134,7 +155,8 @@ _RANGES: dict[str, tuple[int, int]] = {
     "collect.min_chars": (1, 40),
     "collect.retention_days": (0, 3650),
     "collect.max_per_group": (500, 2000000),
-    "render.image_quality": (40, 100),
+    "render.card_scale": (100, 300),
+    "render.image_quality": (60, 100),
     "limits.user_cooldown_sec": (0, 86400),
     "limits.target_cooldown_sec": (0, 86400),
     "limits.group_daily_quota": (0, 100000),

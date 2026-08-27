@@ -6,10 +6,45 @@
  * 绝不拼进 innerHTML，避免把画像文本当 HTML 解析。
  */
 
-const bridge = window.AstrBotPluginPage;
+/**
+ * 桥接句柄必须惰性解析。AstrBot 会把 bridge-sdk.js 注入页面，但注入时机不保证
+ * 早于本脚本执行（未显式声明时它会被插到 </body> 前，即排在 app.js 之后），
+ * 所以这里只留一个可变引用，真正取值交给 waitForBridge() 轮询。
+ */
+let bridge = window.AstrBotPluginPage || null;
+
+/** 等待 window.AstrBotPluginPage 出现的上限（毫秒）。 */
+const BRIDGE_WAIT_MS = 10000;
+/** 等待 bridge.ready() 的上限：父窗口不下发 context 时该 promise 永不 resolve。 */
+const BRIDGE_READY_MS = 8000;
+/** 单次后端请求的上限：桥接经 postMessage 转发，本身没有超时保护。 */
+const REQUEST_TIMEOUT_MS = 20000;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const THEME_KEY = "persona-prism-theme";
+
+/** 提示词输出布局的兜底文案；正常情况下后端会在 /prompts 里下发 layouts。 */
+const FALLBACK_LAYOUTS = [
+  { value: "card", label: "结构化卡片", hint: "要求模型返回 JSON，渲染成信息卡。" },
+  { value: "markdown", label: "长文卡片", hint: "模型自由写 Markdown，再排成长图卡。" },
+  { value: "text", label: "纯文本", hint: "原样发文字，不出图。" },
+];
+
+/** 把任意值收敛成合法布局，规则和后端 normalize_layout 保持一致。 */
+function normalizeLayout(value, structured) {
+  const text = String(value || "").trim().toLowerCase();
+  if (text === "card" || text === "markdown" || text === "text") {
+    return text;
+  }
+  return structured === false ? "text" : "card";
+}
+
+/** 取布局的显示名。 */
+function layoutLabel(value) {
+  const list = (state.prompts && state.prompts.layouts) || FALLBACK_LAYOUTS;
+  const hit = list.find((item) => item.value === value);
+  return hit ? hit.label : value;
+}
 const PAGE_SIZE = 20;
 
 const THEME_OPTIONS = [
@@ -65,6 +100,8 @@ const state = {
   view: "overview",
   theme: "auto",
   booted: false,
+  bootFailed: false,
+  eventsBound: false,
   overview: null,
   tree: null,
   records: { items: [], page: 1, pages: 1, total: 0 },
@@ -264,12 +301,13 @@ function toggleThemeMenu(force) {
 function toast(message, tone) {
   const kind = tone || "info";
   const node = make("div", "toast toast--" + kind);
-  const symbol = kind === "ok" ? "i-check" : kind === "err" ? "i-alert" : "i-spark";
+  const symbol = kind === "ok" ? "i-check" : kind === "err" || kind === "warn" ? "i-alert" : "i-spark";
   append(node, [icon(symbol, 16), make("span", "", message)]);
   dom.toasts.appendChild(node);
+  const linger = kind === "err" ? 6000 : kind === "warn" ? 5000 : 3200;
   window.setTimeout(() => {
     node.remove();
-  }, kind === "err" ? 6000 : 3200);
+  }, linger);
 }
 
 /* -------------------------------------------------------------- 桥接封装 */
@@ -282,18 +320,63 @@ function unwrap(payload) {
   return payload;
 }
 
+/** 取桥接句柄；SDK 可能在本脚本之后才挂载，所以每次都重新看一眼 window。 */
+function pickBridge() {
+  if (!bridge && window.AstrBotPluginPage) {
+    bridge = window.AstrBotPluginPage;
+  }
+  return bridge;
+}
+
+/** 轮询等待桥接 SDK 挂载，超时返回 null 而不是抛错，交由调用方决定降级方式。 */
+function waitForBridge(timeoutMs) {
+  if (pickBridge()) {
+    return Promise.resolve(bridge);
+  }
+  const deadline = Date.now() + (timeoutMs || BRIDGE_WAIT_MS);
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (pickBridge()) {
+        resolve(bridge);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(null);
+        return;
+      }
+      window.setTimeout(tick, 60);
+    };
+    window.setTimeout(tick, 60);
+  });
+}
+
+/** 给任意 promise 套一层超时，避免桥接侧无响应时界面永久卡在加载态。 */
+function withTimeout(promise, ms, label) {
+  let timer = 0;
+  const guard = new Promise((resolve, reject) => {
+    timer = window.setTimeout(() => {
+      reject(new Error((label || "请求") + "超时（" + Math.round(ms / 1000) + "秒无响应）。"));
+    }, ms);
+  });
+  return Promise.race([promise, guard]).finally(() => {
+    window.clearTimeout(timer);
+  });
+}
+
 async function apiGet(endpoint, params) {
-  if (!bridge) {
+  const link = pickBridge();
+  if (!link) {
     throw new Error("AstrBot 页面桥接未加载。");
   }
-  return unwrap(await bridge.apiGet(endpoint, params || {}));
+  return unwrap(await withTimeout(link.apiGet(endpoint, params || {}), REQUEST_TIMEOUT_MS, endpoint));
 }
 
 async function apiPost(endpoint, body) {
-  if (!bridge) {
+  const link = pickBridge();
+  if (!link) {
     throw new Error("AstrBot 页面桥接未加载。");
   }
-  return unwrap(await bridge.apiPost(endpoint, body || {}));
+  return unwrap(await withTimeout(link.apiPost(endpoint, body || {}), REQUEST_TIMEOUT_MS, endpoint));
 }
 
 /* -------------------------------------------------------------- 通用零件 */
@@ -1286,7 +1369,7 @@ function promptEditor(entry) {
     command: entry ? entry.command : "",
     label: entry ? entry.label : "",
     prompt: entry ? entry.prompt : "",
-    structured: entry ? entry.structured !== false : true,
+    layout: entry ? normalizeLayout(entry.layout, entry.structured) : "card",
     enabled: entry ? entry.enabled !== false : true,
   };
   const isNew = !entry;
@@ -1338,18 +1421,28 @@ function promptEditor(entry) {
     make("p", "field__hint", "会印在卡片标题上。"),
   ]);
 
-  const flagField = make("div", "field");
-  const structWrap = make("label", "switch");
-  const structInput = make("input");
-  structInput.type = "checkbox";
-  structInput.checked = draft.structured;
-  const structCaption = make("span", "", draft.structured ? "结构化输出（渲染卡片）" : "自由文本（直接发文字）");
-  structInput.addEventListener("change", () => {
-    draft.structured = structInput.checked;
-    structCaption.textContent = structInput.checked ? "结构化输出（渲染卡片）" : "自由文本（直接发文字）";
+  const layoutField = make("div", "field");
+  const layoutOptions = (state.prompts && state.prompts.layouts) || FALLBACK_LAYOUTS;
+  const layoutSelect = make("select", "select");
+  for (const item of layoutOptions) {
+    const opt = make("option", "", item.label);
+    opt.value = item.value;
+    layoutSelect.appendChild(opt);
+  }
+  layoutSelect.value = draft.layout;
+  const layoutHint = make("p", "field__hint", "");
+  const syncLayoutHint = () => {
+    const hit = layoutOptions.find((item) => item.value === layoutSelect.value);
+    layoutHint.textContent = hit && hit.hint ? hit.hint : "";
+  };
+  syncLayoutHint();
+  layoutSelect.addEventListener("change", () => {
+    draft.layout = layoutSelect.value;
+    syncLayoutHint();
   });
-  append(structWrap, [structInput, make("span", "switch__track"), structCaption]);
+  append(layoutField, [make("label", "field__label", "输出形态"), layoutSelect, layoutHint]);
 
+  const flagField = make("div", "field");
   const enabledWrap = make("label", "switch");
   const enabledInput = make("input");
   enabledInput.type = "checkbox";
@@ -1361,9 +1454,9 @@ function promptEditor(entry) {
   });
   append(enabledWrap, [enabledInput, make("span", "switch__track"), enabledCaption]);
 
-  append(flagField, [make("label", "field__label", "输出形态"), structWrap, enabledWrap]);
+  append(flagField, [make("label", "field__label", "启用状态"), enabledWrap]);
 
-  append(grid, [keyField, cmdField, labelField, flagField]);
+  append(grid, [keyField, cmdField, labelField, layoutField, flagField]);
   box.body.appendChild(grid);
 
   const promptField = make("div", "field");
@@ -1411,7 +1504,7 @@ function promptCard(entry, builtin) {
   append(top, [
     make("strong", "", entry.label || entry.key),
     pill(entry.command, "pill--accent pill--mono"),
-    pill(entry.structured === false ? "自由文本" : "结构化卡片"),
+    pill(layoutLabel(normalizeLayout(entry.layout, entry.structured))),
     builtin ? pill("内置", "pill--muted") : pill(entry.enabled === false ? "已停用" : "已启用", entry.enabled === false ? "pill--warn" : "pill--ok"),
   ]);
   const tools = make("div", "promptcard__tools");
@@ -1426,7 +1519,7 @@ function promptCard(entry, builtin) {
             command: "",
             label: entry.label + " 副本",
             prompt: entry.prompt,
-            structured: entry.structured !== false,
+            layout: normalizeLayout(entry.layout, entry.structured),
             enabled: true,
           };
           render();
@@ -1438,7 +1531,9 @@ function promptCard(entry, builtin) {
       button("编辑", {
         small: true,
         onClick: () => {
-          state.promptDraft = Object.assign({}, entry);
+          state.promptDraft = Object.assign({}, entry, {
+            layout: normalizeLayout(entry.layout, entry.structured),
+          });
           render();
         },
       }),
@@ -1489,7 +1584,7 @@ function renderPrompts(root) {
         small: true,
         icon: "i-plus",
         onClick: () => {
-          state.promptDraft = { key: "", command: "", label: "", prompt: "", structured: true, enabled: true };
+          state.promptDraft = { key: "", command: "", label: "", prompt: "", layout: "card", enabled: true };
           render();
         },
       }),
@@ -1623,7 +1718,9 @@ async function savePrompt(draft) {
       command: draft.command,
       label: draft.label,
       prompt: draft.prompt,
-      structured: draft.structured !== false,
+      // structured 由 layout 推导：只有结构化卡片才要求模型返回 JSON。
+      structured: normalizeLayout(draft.layout, true) === "card",
+      layout: normalizeLayout(draft.layout, true),
       enabled: draft.enabled !== false,
     });
     state.promptDraft = null;
@@ -1766,6 +1863,9 @@ function renderNav() {
 }
 
 function render() {
+  if (state.bootFailed) {
+    return;
+  }
   const view = VIEWS.find((item) => item.id === state.view) || VIEWS[0];
   dom.viewTitle.textContent = view.label;
   dom.viewKicker.textContent = view.kicker;
@@ -1919,11 +2019,18 @@ function bindEvents() {
 
 /* -------------------------------------------------------------------- 引导 */
 
-function showBootFailure() {
+function showBootFailure(reason) {
   clear(dom.main);
   const box = make("div", "bootfail");
   const mark = make("span", "brand__mark");
   mark.appendChild(icon("i-alert", 22));
+  const retry = make("button", "btn btn--primary", "重新连接");
+  retry.type = "button";
+  retry.addEventListener("click", () => {
+    retry.disabled = true;
+    retry.textContent = "正在重连…";
+    void boot();
+  });
   append(box, [
     mark,
     make("h2", "", "页面桥接没有加载"),
@@ -1933,8 +2040,16 @@ function showBootFailure() {
       "这个页面需要在 AstrBot 控制台内打开：进入「插件」页，找到「人格棱镜」，点开它的管理面板。" +
         "直接用浏览器打开 index.html 是拿不到数据的。",
     ),
+    reason ? make("p", "bootfail__detail", reason) : null,
+    retry,
   ]);
   dom.main.appendChild(box);
+}
+
+/** 引导失败时把界面锁在提示面板上，避免后续 render() 把提示覆盖成加载骨架。 */
+function haltWithBootFailure(reason) {
+  state.bootFailed = true;
+  showBootFailure(reason);
 }
 
 function cacheDom() {
@@ -1963,28 +2078,45 @@ function readStoredTheme() {
 }
 
 async function boot() {
+  state.bootFailed = false;
   cacheDom();
   applyTheme(readStoredTheme(), false);
+
+  // 先确认桥接可用再渲染任何视图：否则各视图的取数会一起报错刷 toast。
+  clear(dom.main);
+  dom.main.appendChild(loadingState("正在连接 AstrBot 控制台…"));
   renderNav();
 
-  if (!bridge) {
-    showBootFailure();
+  const link = await waitForBridge(BRIDGE_WAIT_MS);
+  if (!link) {
+    haltWithBootFailure(
+      "已等待 " + Math.round(BRIDGE_WAIT_MS / 1000) + " 秒仍未检测到 window.AstrBotPluginPage。" +
+        "若你确实是在控制台里打开的，请刷新一次页面；持续失败请检查浏览器控制台是否拦截了 bridge-sdk.js。",
+    );
     return;
   }
 
-  bindEvents();
+  if (!state.eventsBound) {
+    bindEvents();
+    state.eventsBound = true;
+  }
   render();
 
+  // ready() 只在父窗口下发 context 后 resolve，必须加超时兜底，否则页面永久转圈。
   try {
-    if (typeof bridge.ready === "function") {
-      await bridge.ready();
+    if (typeof link.ready === "function") {
+      await withTimeout(link.ready(), BRIDGE_READY_MS, "等待控制台下发上下文");
     }
   } catch (err) {
-    toast("等待页面桥接就绪失败：" + err.message, "err");
+    toast(err.message + " 已跳过握手继续加载数据。", "warn");
   }
 
   await loadOverview();
-  if (state.overview && state.overview.version) {
+  if (!state.overview) {
+    haltWithBootFailure("桥接已就绪，但读取运行状态失败。请确认插件已启用，然后点下面的按钮重试。");
+    return;
+  }
+  if (state.overview.version) {
     dom.versionPill.textContent = state.overview.version;
   }
   await loadPrompts();

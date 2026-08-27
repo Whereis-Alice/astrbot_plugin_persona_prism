@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from astrbot.api import logger
+from astrbot.api import logger, sp
 from astrbot.api import message_components as Comp
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -30,14 +30,26 @@ from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
 from .prism.config import ConfigError, PrismConfig
 from .prism.models import CorpusBundle, CorpusMessage, MemberProfile, PortraitRecord
-from .prism.prompts import PromptLibrary, PromptSpec
+from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.0.0"
+PLUGIN_VERSION = "v1.1.0"
 
 #: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
-BUILTIN_COMMANDS = ("棱镜画像", "棱镜赞赏", "棱镜锐评", "棱镜克隆", "棱镜姻缘")
+#: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
+BUILTIN_COMMANDS = (
+    "棱镜画像",
+    "棱镜赞赏",
+    "棱镜锐评",
+    "棱镜克隆",
+    "棱镜姻缘",
+    "画像",
+    "正画像",
+    "负画像",
+    "克隆人格",
+    "找对象",
+)
 
 #: 本插件自己的所有指令。语料采集时会把这些消息剔除，免得画像里全是指令回声。
 OWN_COMMANDS = (
@@ -58,7 +70,33 @@ OWN_COMMANDS = (
     "棱镜清缓存",
     "棱镜主题",
     "棱镜统计",
+    "画像",
+    "正画像",
+    "负画像",
+    "克隆人格",
+    "找对象",
+    "查看画像",
+    "切换人格",
+    "恢复人格",
 )
+
+#: 「画像」系列（兼容上游）用到的提示词 key。
+LEGACY_KEYS: dict[str, str] = {
+    "画像": "legacy_portrait",
+    "正画像": "legacy_positive",
+    "负画像": "legacy_negative",
+    "克隆人格": "legacy_clone",
+    "找对象": "legacy_match",
+}
+
+#: 可以拿来做人格克隆的记录类型，按优先级排列。
+CLONE_KINDS = ("legacy_clone", "clone")
+
+#: 共享偏好存储里的键。加插件前缀，避免和上游插件的备份互相覆盖。
+_SP_BOT_BACKUP = "persona_prism_original_bot_info"
+_SP_PERSONA_BACKUP = "persona_prism_persona_backup"
+#: 克隆人格在 AstrBot 人格列表里的 ID 前缀。
+_PERSONA_ID_PREFIX = "persona_prism_clone_"
 
 _QQ_RE = re.compile(r"^\d{5,12}$")
 _DIGITS_RE = re.compile(r"(?<!\d)(\d{5,12})(?!\d)")
@@ -93,6 +131,23 @@ def _as_int(value: Any) -> int | None:
             return int(text)
         except ValueError:
             return None
+    return None
+
+
+def _history_cursor(raw: Any) -> int | None:
+    """从一条群历史消息里取出翻页游标。
+
+    get_group_msg_history 的 message_seq 参数期望的是**序号**，不是消息 ID。
+    go-cqhttp / NapCat / Lagrange / LLBot（幸运莉莉娅）都会在返回里附带
+    message_seq，而 LLBot 上 message_id 与 seq 完全是两套编号，拿 message_id
+    当游标会导致回溯永远停在第一页。所以这里优先 seq，缺失才回落 message_id。
+    """
+    if not isinstance(raw, dict):
+        return None
+    for key in ("message_seq", "real_seq", "message_id"):
+        parsed = _as_int(raw.get(key))
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -333,8 +388,11 @@ class PersonaPrismStar(Star):
         """向更早的历史翻页，直到攒够目标条数或翻到头。
 
         与上游的差异：
-        * 游标用 _as_int 解析，兼容负数 message_id（NapCat / Lagrange）。
-        * 断点记在 scan_state 表里，重启后接着挖而不是从头再来。
+        * 游标优先用 message_seq，缺失才回落 message_id，并用 _as_int 解析，
+          兼容负数 message_id（NapCat / Lagrange）与独立 seq 编号（LLBot）。
+        * 断点记在 scan_state 表里，重启后接着挖而不是从头再来；已经挖到群历史
+          尽头的群只补拉最新一页（补齐机器人离线期间漏掉的消息），不再无意义地
+          继续往前翻。
         * 每页写库前先过滤本插件自己的指令消息。
         """
         client = getattr(event, "bot", None)
@@ -344,9 +402,16 @@ class PersonaPrismStar(Star):
         rounds = max(0, self.config.int_of("collect.backfill_rounds"))
         page_size = max(20, self.config.int_of("collect.page_size"))
         state = await self.astore.get_scan_state(platform, group_id)
-        cursor = _as_int(state.get("oldest_seq")) if state.get("oldest_seq") else None
+        #: 历史已经挖到最早一条。此时往前翻只会拿到空页，但机器人离线期间的新消息
+        #: 被动采集是拿不到的，所以退化成"只补拉最新一页"，且不动断点。
+        topup_only = bool(state.get("exhausted"))
+        cursor = None if topup_only else (
+            _as_int(state.get("oldest_seq")) if state.get("oldest_seq") else None
+        )
         newest_seen = str(state.get("newest_seq") or "")
         added = 0
+        if topup_only:
+            rounds = min(rounds, 1)
 
         for index in range(rounds):
             seq = 0 if (index == 0 and cursor is None) else (cursor or 0)
@@ -364,7 +429,8 @@ class PersonaPrismStar(Star):
 
             messages = (payload or {}).get("messages") if isinstance(payload, dict) else payload
             if not messages:
-                await self.astore.set_scan_state(platform, group_id, exhausted=True)
+                if not topup_only:
+                    await self.astore.set_scan_state(platform, group_id, exhausted=True)
                 break
 
             rows = collector.parse_history_page(messages)
@@ -379,10 +445,12 @@ class PersonaPrismStar(Star):
             if cleaned:
                 added += await self.astore.add_messages(platform, group_id, cleaned)
 
-            oldest = _as_int(messages[0].get("message_id")) if isinstance(messages[0], dict) else None
+            if topup_only:
+                break
+
+            oldest = _history_cursor(messages[0])
             if not newest_seen:
-                tail = messages[-1] if isinstance(messages[-1], dict) else {}
-                newest_seen = str(_as_int(tail.get("message_id")) or "")
+                newest_seen = str(_history_cursor(messages[-1]) or "")
             if oldest is None or oldest == cursor:
                 await self.astore.set_scan_state(platform, group_id, exhausted=True)
                 break
@@ -600,14 +668,19 @@ class PersonaPrismStar(Star):
                 show_evidence=self.config.bool_of("render.show_evidence"),
                 show_avatar=self.config.bool_of("render.show_avatar"),
             )
-            if spec.structured:
-                result = await self.renderer.render(
-                    portrait,
+            record_key = f"{spec.key}_{record_id}"
+            layout = normalize_layout(spec.layout, spec.structured)
+            if layout == "card":
+                result = await self.renderer.render(portrait, ctx, record_key=record_key)
+            elif layout == "markdown":
+                # 「画像」系列输出的是自由排版长文，走 Markdown 卡片，主题与结构化卡片一致。
+                result = await self.renderer.render_markdown(
+                    portrait.raw_text or record.text,
                     ctx,
-                    record_key=f"{spec.key}_{record_id}",
+                    record_key=record_key,
                 )
             else:
-                # 非结构化玩法（如人格克隆）的产物是一段可复制的提示词，出图反而没法用。
+                # 纯文本玩法（人格克隆）的产物要能整段复制，出图反而没法用。
                 result = RenderResult(backend="text", text=record.text)
             backend = result.backend
             self._last_backend = result.backend
@@ -669,19 +742,30 @@ class PersonaPrismStar(Star):
         async for result in self._execute(event, self.library.get("match")):
             yield result
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("棱镜克隆")
     async def cmd_clone(self, event: AstrMessageEvent):
         """把群友的说话风格提炼成一段可直接粘贴的人格提示词。"""
+        async for result in self._clone_flow(event, "clone", "棱镜克隆"):
+            yield result
+
+    async def _clone_flow(self, event: AstrMessageEvent, key: str, command: str):
+        """人格克隆的公共前置校验。
+
+        权限用配置项而不是 @permission_type 装饰器控制：上游的「克隆人格」对所有人
+        开放，而本插件默认只给管理员，两套指令必须走同一把锁，否则等于留了后门。
+        """
         if not self.config.bool_of("persona_clone.enabled"):
             yield event.plain_result("人格克隆已在配置中关闭。")
             return
-        async for result in self._execute(event, self.library.get("clone")):
+        if self.config.bool_of("persona_clone.require_admin") and not event.is_admin():
+            yield event.plain_result("人格克隆目前仅限管理员使用。")
+            return
+        async for result in self._execute(event, self.library.get(key)):
             yield result
-        async for extra in self._sync_bot_identity(event):
+        async for extra in self._sync_bot_identity(event, command):
             yield extra
 
-    async def _sync_bot_identity(self, event: AstrMessageEvent):
+    async def _sync_bot_identity(self, event: AstrMessageEvent, command: str = "棱镜克隆"):
         """可选地把机器人的昵称/头像同步成克隆对象的。
 
         上游的「切换人格」会无条件改掉机器人的全局昵称与头像，而且没有恢复入口，
@@ -694,7 +778,8 @@ class PersonaPrismStar(Star):
         client = getattr(event, "bot", None)
         if client is None:
             return
-        target_id, target_name = await self._resolve_target(event, "棱镜克隆")
+        target_id, target_name = await self._resolve_target(event, command)
+        await self._backup_bot_identity(event, event.unified_msg_origin)
         done: list[str] = []
         if want_nick and target_name:
             with contextlib.suppress(Exception):
@@ -712,17 +797,340 @@ class PersonaPrismStar(Star):
                 "已按配置同步机器人的" + "与".join(done) + "（这是全局改动，可在配置中关闭）。",
             )
 
+    # -------------------------------------------- 画像系列（兼容上游 portrayal）
+
+    def _legacy_gate(self) -> str:
+        """「画像」系列的总开关。返回空串表示放行，否则返回给用户看的提示语。"""
+        if self.config.bool_of("compat.legacy_commands"):
+            return ""
+        return "「画像」系列指令已在配置里关闭，可以改用「棱镜画像」等棱镜系列指令。"
+
+    async def _legacy(self, event: AstrMessageEvent, command: str):
+        """「画像」系列复用同一条生成链路，区别只在提示词输出长文而不是 JSON。"""
+        blocked = self._legacy_gate()
+        if blocked:
+            yield event.plain_result(blocked)
+            return
+        async for result in self._execute(event, self.library.get(LEGACY_KEYS[command])):
+            yield result
+
+    @filter.command("画像")
+    async def cmd_legacy_portrait(self, event: AstrMessageEvent):
+        """上游同款的综合画像长文，渲染成 Markdown 卡片。"""
+        async for result in self._legacy(event, "画像"):
+            yield result
+
+    @filter.command("正画像")
+    async def cmd_legacy_positive(self, event: AstrMessageEvent):
+        """只写优点的长文画像。"""
+        async for result in self._legacy(event, "正画像"):
+            yield result
+
+    @filter.command("负画像")
+    async def cmd_legacy_negative(self, event: AstrMessageEvent):
+        """只写缺点的长文画像。"""
+        async for result in self._legacy(event, "负画像"):
+            yield result
+
+    @filter.command("找对象")
+    async def cmd_legacy_match(self, event: AstrMessageEvent):
+        """在群里挑一个最合适的搭子。"""
+        async for result in self._legacy(event, "找对象"):
+            yield result
+
+    @filter.command("克隆人格")
+    async def cmd_legacy_clone(self, event: AstrMessageEvent):
+        """把群友的说话风格提炼成人格提示词，供「切换人格」使用。"""
+        blocked = self._legacy_gate()
+        if blocked:
+            yield event.plain_result(blocked)
+            return
+        async for result in self._clone_flow(event, "legacy_clone", "克隆人格"):
+            yield result
+
+    @filter.command("查看画像")
+    async def cmd_legacy_latest(self, event: AstrMessageEvent):
+        """以纯文本重发最近一次画像，方便直接复制。
+
+        和「棱镜档案」的区别：那条重发卡片图片，这条给的是可复制的文字。
+        """
+        blocked = self._legacy_gate()
+        if blocked:
+            yield event.plain_result(blocked)
+            return
+        platform, group_id = self._scope(event)
+        target_id, target_hint = await self._resolve_target(event, "查看画像")
+        record = await self.astore.latest_portrait(platform, group_id, target_id)
+        if record is None:
+            yield event.plain_result("还没有这个人的画像记录，先用「画像」生成一份。")
+            return
+        stamp = _fmt_ts(record.created_at, "%Y-%m-%d %H:%M")
+        who = record.user_name or target_hint or target_id
+        head = f"{who} · {record.kind_label or record.kind}"
+        if stamp:
+            head = f"{head}（{stamp}）"
+        yield event.plain_result(f"{head}\n\n{record.text or '（内容已丢失）'}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("切换人格")
+    async def cmd_legacy_switch(self, event: AstrMessageEvent):
+        """把当前对话切换成某人的克隆人格。
+
+        上游是直接覆盖全局默认人格、顺手改掉机器人昵称头像且没有回退路径。
+        这里只改当前会话所在的那条对话分支，并把原人格备份下来供「恢复人格」还原。
+        """
+        blocked = self._legacy_gate()
+        if blocked:
+            yield event.plain_result(blocked)
+            return
+        if not self.config.bool_of("persona_clone.enabled"):
+            yield event.plain_result("人格克隆已在配置中关闭。")
+            return
+        platform, group_id = self._scope(event)
+        target_id, target_hint = await self._resolve_target(event, "切换人格")
+        if self.config.is_protected(target_id):
+            yield event.plain_result("对方在保护名单里，不能被克隆。")
+            return
+        if self.config.bool_of("privacy.allow_opt_out") and await self.astore.is_opted_out(
+            platform,
+            group_id,
+            target_id,
+        ):
+            yield event.plain_result("对方已经隐身，不能被克隆。")
+            return
+        prompt, record = await self._latest_clone_prompt(platform, group_id, target_id)
+        if not prompt:
+            yield event.plain_result("还没有这个人的人格克隆结果，先用「克隆人格」生成一份。")
+            return
+        umo = event.unified_msg_origin
+        conv_mgr = self.context.conversation_manager
+        cid = await conv_mgr.get_curr_conversation_id(umo)
+        if not cid:
+            yield event.plain_result("当前会话还没有对话，先发 /new 新建一个再切换。")
+            return
+        persona_id = f"{_PERSONA_ID_PREFIX}{target_id}"
+        try:
+            await self._upsert_persona(persona_id, prompt)
+        except Exception as exc:
+            logger.exception("[人格棱镜] 写入人格失败")
+            yield event.plain_result(f"写入人格失败：{type(exc).__name__}: {exc}")
+            return
+        previous = ""
+        with contextlib.suppress(Exception):
+            conv = await conv_mgr.get_conversation(umo, cid, create_if_not_exists=False)
+            previous = str(getattr(conv, "persona_id", "") or "")
+        await sp.put_async(
+            scope="umo",
+            scope_id=umo,
+            key=_SP_PERSONA_BACKUP,
+            value={"persona_id": previous, "cid": cid},
+        )
+        await conv_mgr.update_conversation(umo, conversation_id=cid, persona_id=persona_id)
+        notes: list[str] = []
+        if self.config.bool_of("persona_clone.clear_history_on_switch"):
+            with contextlib.suppress(Exception):
+                await conv_mgr.update_conversation(umo, conversation_id=cid, history=[])
+            notes.append("已清空当前对话的上下文")
+        session_conf = await sp.get_async("umo", umo, "session_service_config", None)
+        if isinstance(session_conf, dict) and session_conf.get("persona_id"):
+            notes.append("本会话设置了会话级人格，优先级高于对话人格，可能盖掉这次切换")
+        display = (record.user_name if record else "") or target_hint or target_id
+        tail = ("\n" + "；".join(notes) + "。") if notes else ""
+        yield event.plain_result(
+            f"已切换到「{display}」的克隆人格，用「恢复人格」可以还原。{tail}",
+        )
+        async for extra in self._sync_bot_identity(event, "切换人格"):
+            yield extra
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("恢复人格")
+    async def cmd_legacy_restore(self, event: AstrMessageEvent):
+        """还原「切换人格」的改动：对话人格、上下文、机器人昵称与头像。"""
+        blocked = self._legacy_gate()
+        if blocked:
+            yield event.plain_result(blocked)
+            return
+        umo = event.unified_msg_origin
+        conv_mgr = self.context.conversation_manager
+        backup = await sp.get_async("umo", umo, _SP_PERSONA_BACKUP, None)
+        cid = ""
+        target_persona = ""
+        if isinstance(backup, dict):
+            cid = str(backup.get("cid") or "")
+            target_persona = str(backup.get("persona_id") or "")
+        if not cid:
+            cid = await conv_mgr.get_curr_conversation_id(umo) or ""
+        if not cid:
+            yield event.plain_result("当前会话没有可恢复的对话。")
+            return
+        if not target_persona:
+            # 没有备份就回落到全局默认人格；连默认人格都没配就显式关掉人格注入。
+            with contextlib.suppress(Exception):
+                conf = self.context.get_config(umo=umo)
+                settings = conf.get("provider_settings") or {}
+                target_persona = str(settings.get("default_personality") or "")
+        if not target_persona:
+            target_persona = "[%None]"
+        await conv_mgr.update_conversation(umo, conversation_id=cid, persona_id=target_persona)
+        notes: list[str] = []
+        if self.config.bool_of("persona_clone.clear_history_on_switch"):
+            with contextlib.suppress(Exception):
+                await conv_mgr.update_conversation(umo, conversation_id=cid, history=[])
+            notes.append("已清空对话上下文")
+        notes.extend(await self._restore_bot_identity(event, umo))
+        with contextlib.suppress(Exception):
+            await sp.remove_async(scope="umo", scope_id=umo, key=_SP_PERSONA_BACKUP)
+        label = (
+            "无人格状态（不再注入人格）"
+            if target_persona == "[%None]"
+            else f"人格「{target_persona}」"
+        )
+        tail = ("\n" + "；".join(notes) + "。") if notes else ""
+        yield event.plain_result(f"已恢复为{label}。{tail}")
+
+    async def _latest_clone_prompt(
+        self,
+        platform: str,
+        group_id: str,
+        target_id: str,
+    ) -> tuple[str, PortraitRecord | None]:
+        """取最近一次可用的人格克隆文本，兼容两套指令产生的记录类型。"""
+        for kind in CLONE_KINDS:
+            record = await self.astore.latest_portrait(platform, group_id, target_id, kind)
+            if record is None:
+                continue
+            prompt = str(record.payload.get("raw_text") or "").strip() or record.text.strip()
+            if prompt:
+                return prompt, record
+        return "", None
+
+    async def _upsert_persona(self, persona_id: str, prompt: str) -> None:
+        """把克隆提示词写进 AstrBot 的人格列表：有则更新，无则新建。"""
+        manager = self.context.persona_manager
+        existing = None
+        with contextlib.suppress(Exception):
+            existing = await manager.get_persona(persona_id)
+        if existing is None:
+            await manager.create_persona(persona_id=persona_id, system_prompt=prompt)
+            return
+        kwargs: dict[str, Any] = {"persona_id": persona_id, "system_prompt": prompt}
+        # tools / skills 不传等于「不修改」，所以只在确实有值时才回填。
+        for name in ("tools", "skills"):
+            value = getattr(existing, name, None)
+            if value is not None:
+                kwargs[name] = value
+        await manager.update_persona(**kwargs)
+
+    async def _backup_bot_identity(self, event: AstrMessageEvent, umo: str) -> None:
+        """改机器人昵称/头像之前，先把原始身份备份到共享存储。"""
+        want_nick = self.config.bool_of("persona_clone.sync_bot_nickname")
+        want_avatar = self.config.bool_of("persona_clone.sync_bot_avatar")
+        if not (want_nick or want_avatar):
+            return
+        existing = await sp.get_async("umo", umo, _SP_BOT_BACKUP, None)
+        if isinstance(existing, dict) and existing:
+            return  # 已有备份就不覆盖，否则连续切换会把真正的原始身份冲掉
+        client = getattr(event, "bot", None)
+        if client is None:
+            return
+        info: dict[str, Any] = {}
+        with contextlib.suppress(Exception):
+            raw = await client.api.call_action("get_login_info") or {}
+            info["nickname"] = str(raw.get("nickname") or "")
+            info["user_id"] = str(raw.get("user_id") or "")
+        if not info:
+            return
+        if want_avatar and info.get("user_id"):
+            info["avatar_b64"] = await self._download_base64(
+                _AVATAR_TEMPLATE.format(uid=info["user_id"]),
+            )
+        with contextlib.suppress(Exception):
+            await sp.put_async(scope="umo", scope_id=umo, key=_SP_BOT_BACKUP, value=info)
+
+    async def _restore_bot_identity(self, event: AstrMessageEvent, umo: str) -> list[str]:
+        """还原机器人昵称与头像。
+
+        头像必须用备份下来的 base64 回灌：同步时用的是「按 QQ 号取头像」的 URL，
+        而那个 URL 现在指向的正是克隆对象，拿它恢复等于没恢复。
+        """
+        backup = await sp.get_async("umo", umo, _SP_BOT_BACKUP, None)
+        if not isinstance(backup, dict) or not backup:
+            return []
+        client = getattr(event, "bot", None)
+        if client is None:
+            return []
+        done: list[str] = []
+        nickname = str(backup.get("nickname") or "")
+        if nickname:
+            with contextlib.suppress(Exception):
+                await client.api.call_action("set_qq_profile", nickname=nickname)
+                done.append("已还原机器人昵称")
+        avatar_b64 = str(backup.get("avatar_b64") or "")
+        if avatar_b64:
+            with contextlib.suppress(Exception):
+                await client.api.call_action("set_qq_avatar", file=f"base64://{avatar_b64}")
+                done.append("已还原机器人头像")
+        if done:
+            with contextlib.suppress(Exception):
+                await sp.remove_async(scope="umo", scope_id=umo, key=_SP_BOT_BACKUP)
+        return done
+
+    @staticmethod
+    async def _download_base64(url: str, *, limit: int = 4 * 1024 * 1024) -> str:
+        """下载一张图片并转成 base64；失败、非 200 或超限都返回空串。"""
+        try:
+            import aiohttp
+        except ImportError:
+            return ""
+        raw = b""
+        with contextlib.suppress(Exception):
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.get(url) as resp,
+            ):
+                if resp.status != 200:
+                    return ""
+                raw = await resp.content.read(limit + 1)
+        if raw and len(raw) <= limit:
+            return base64.b64encode(raw).decode("ascii")
+        return ""
+
     @filter.command("棱镜帮助")
     async def cmd_help(self, event: AstrMessageEvent):
         """列出全部指令与当前渲染状态。"""
+        legacy_on = bool(self.config.get("compat.legacy_commands", True))
+        prism_specs: list[PromptSpec] = []
+        legacy_specs: list[PromptSpec] = []
+        custom_specs: list[PromptSpec] = []
+        for spec in self.library.all_specs():
+            if not spec.builtin:
+                custom_specs.append(spec)
+            elif spec.key in LEGACY_KEYS.values():
+                legacy_specs.append(spec)
+            else:
+                prism_specs.append(spec)
         lines = [
             f"人格棱镜 {PLUGIN_VERSION} · 指令一览",
             "",
-            "【画像玩法】目标可用 @对方 / 回复对方消息 / 直接跟 QQ 号，省略则画自己",
+            "目标写法通用：@对方 / 回复对方的消息 / 直接跟 QQ 号，都省略就是画自己。",
+            "",
+            "【棱镜系列】结构化信息卡（评分、雷达图、原话引用）",
         ]
-        for spec in self.library.all_specs():
-            mark = "" if spec.builtin else "（自定义）"
-            lines.append(f"  {spec.command} —— {spec.label}{mark}")
+        for spec in prism_specs:
+            lines.append(f"  {spec.command} —— {spec.label}")
+        if legacy_on and legacy_specs:
+            lines += ["", "【画像系列】上游同款长文报告，改用本插件的卡片渲染"]
+            for spec in legacy_specs:
+                lines.append(f"  {spec.command} —— {spec.label}")
+            lines += [
+                "  查看画像 —— 用纯文本重发最近一次画像结果",
+                "  切换人格 / 恢复人格 —— 让机器人扮演/停止扮演克隆出的人格（管理员）",
+            ]
+        if custom_specs:
+            lines += ["", "【自定义模板】在 WebUI 里增删改"]
+            for spec in custom_specs:
+                lines.append(f"  {spec.command} —— {spec.label}")
         lines += [
             "",
             "【查询】",
@@ -743,6 +1151,7 @@ class PersonaPrismStar(Star):
             "",
             f"当前渲染链路：{self.config.str_of('render.backend')}"
             f"（可用后端 {' → '.join(self.renderer.backends())}）",
+            "棱镜系列出结构化卡片，画像系列出上游同款长文卡，两者互不影响。",
             "更详细的配置与记录管理请打开 WebUI 的「人格棱镜」页面。",
         ]
         yield event.plain_result("\n".join(lines))
@@ -1128,6 +1537,7 @@ class PersonaPrismStar(Star):
             label=entry["label"],
             prompt=entry["prompt"],
             structured=entry["structured"],
+            layout=entry["layout"],
             enabled=entry["enabled"],
         )
         self._reload_prompts()

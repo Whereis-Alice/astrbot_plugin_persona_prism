@@ -73,6 +73,10 @@
           <path d="M8 11.3c.9-.8 2.1-.8 3 0" />
           <path d="M13 11.3c.9-.8 2.1-.8 3 0" />
         </symbol>
+        <symbol id="i-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.2 13.8a4 4 0 010-5.7l2.3-2.3a4 4 0 015.7 5.7l-1.2 1.2" />
+          <path d="M13.8 10.2a4 4 0 010 5.7l-2.3 2.3a4 4 0 01-5.7-5.7l1.2-1.2" />
+        </symbol>
         <symbol id="i-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="9" cy="8.4" r="3.4" />
           <path d="M2.8 20c.5-3.4 3.1-5.6 6.2-5.6s5.7 2.2 6.2 5.6" />
@@ -189,6 +193,9 @@
     <aside class="drawer" id="drawer" hidden aria-label="详情"></aside>
     <div class="toasts" id="toasts" aria-live="polite"></div>
 
+    <!-- 桥接 SDK 必须先于 app.js 加载：显式声明此路径可让 AstrBot 重写为带令牌的地址，
+         同时阻止它把 SDK 自动注入到 </body> 之前（那样会排在 app.js 后面导致取不到桥接）。 -->
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

@@ -338,5 +338,9 @@ class _BrokenConfig:
 def test_renderer_survives_broken_config(tmp_path):
     renderer = cards.CardRenderer(None, _BrokenConfig(), tmp_path / "cards")
     assert renderer.backends() == cards._BACKEND_ORDER["auto"]
-    assert renderer._quality() == 85
+    assert renderer._quality() == 92
     assert renderer._timeout() == 60.0
+    # 配置全炸时清晰度旋钮也得有可用缺省，否则卡片会直接渲染失败。
+    assert renderer._scale() == 2.0
+    assert renderer._image_format() == "jpeg"
+    assert renderer._font_setting() == ("", "", "")

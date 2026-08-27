@@ -2,6 +2,58 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.1.0
+
+兼容上游「画像」系列玩法，卡片清晰度与字体可控，历史回溯适配更多协议端。
+
+### 新增
+
+- **画像系列指令**（兼容上游 astrbot_plugin_portrayal）：`画像`、`正画像`、`负画像`、
+  `找对象`、`克隆人格`、`查看画像`、`切换人格`、`恢复人格`。输出是上游同款长文报告，
+  但走本插件的排版模板与 5 套主题，与「棱镜系列」共用语料库、额度与隐私策略。
+  由 `compat.legacy_commands` 总开关控制（默认开），关掉即可与上游插件共存。
+- **Markdown 长文卡片**：新增 `build_markdown_card_html` 与 `CardRenderer.render_markdown`，
+  支持标题、有序/无序列表、表格、引用、分割线、行内代码；链接只放行 http(s) 与 mailto。
+- **提示词输出版式**：提示词新增 `layout` 字段（`card` / `markdown` / `text`），
+  决定输出契约与渲染模板。WebUI 提示词编辑器改为版式下拉，自定义玩法也能选。
+  内置提示词从 5 套扩展到 10 套。
+- **卡片清晰度**：`render.card_scale`（默认 200，范围 100–300）、
+  `render.image_format`（jpeg / png）、`render.image_quality`（默认 92）。
+  倍率用 CSS zoom 实现，t2i 与本地 Playwright 两条链路表现一致。
+- **自定义字体**：`render.font_family`、`render.font_title_family`、`render.font_source`。
+  字体来源支持本地路径（自动 base64 内嵌，因 t2i 在远端渲染）、http(s) URL 与 data URI，
+  支持 ttf/otf/woff/woff2，本地文件上限 8MB，按路径+mtime+size 缓存。
+- **人格克隆配置组** `persona_clone`：`enabled`、`require_admin`、
+  `clear_history_on_switch`、`sync_bot_nickname`、`sync_bot_avatar`。
+  后两项默认关闭且 WebUI 只读。
+- **主题演示图**：`assets/themes/` 下 6 张真实渲染产物（5 套卡片主题 + 1 张长文卡），
+  已在 README 中展示。
+- README 全面重写：两套玩法对照、语料来源与回溯机制说明、协议端兼容性、
+  清晰度与字体配置、画像准确性设计、完整配置表。
+
+### 修复
+
+- **LLBot（幸运莉莉娅）等协议端历史回溯失效**：翻页游标改为优先 `message_seq` →
+  `real_seq` → `message_id`，并用整数解析替代 `str.isdigit()`。
+  上游做法在 NapCat / Lagrange 的负数 `message_id` 与 LLBot 的双编号体系下会静默停在第一页，
+  表现为「怎么画都说语料不足」。
+- **雷达图轴标签被裁切**：雷达图 viewBox 与容器宽度是两处独立魔法数字，放大后不一致，
+  导致「作息规律」显示成「息规律」。抽成模块常量统一（`RADAR_*`），
+  并对超长标签做省略处理，同时收窄轴标签字号与指标间距。
+- **提示词 layout 归一化**：`PromptSpec.layout` 默认值改为空串并在 `to_dict()` 时归一化；
+  WebUI 提交时 `layout` 为权威字段，缺省或非法才按 `structured` 反推（兼容旧客户端）。
+- `persona_clone.enabled` 等开关此前被误列为「危险配置」而无法在 WebUI 修改，已放开
+  （真正危险的 `sync_bot_nickname` / `sync_bot_avatar` 仍保持只读）。
+- `切换人格` 现在只改当前对话分支并备份原人格，`恢复人格` 可完整还原（含机器人昵称头像）；
+  会话级人格优先级更高时会主动提示用户。
+
+### 变更
+
+- `prompt_entries` 表新增 `layout` 列，附带幂等迁移，旧库自动升级。
+- `棱镜帮助` 重排为「棱镜系列 / 画像系列 / 自定义模板」三段式。
+- WebUI 可编辑配置项从 33 项增加到 42 项（新增 render 清晰度与字体、persona_clone、compat）。
+- 测试数量从 354 增加到 403（新增 Markdown 卡片渲染与兼容层两组测试）。
+
 ## v1.0.0
 
 首个正式版本。基于 [astrbot_plugin_portrayal](https://github.com/Zhalslar/astrbot_plugin_portrayal)

@@ -17,6 +17,7 @@ from typing import Any
 from .cards import BACKEND_LABELS, THEMES
 from .config import DASHBOARD_WRITABLE, DEFAULTS, ConfigError
 from .models import PROFILE_FIELD_LABELS
+from .prompts import VALID_LAYOUTS, normalize_layout
 
 #: 配置项的人类可读说明。WebUI 直接渲染这份表，省得前端硬编码文案。
 FIELD_HINTS: dict[str, dict[str, str]] = {
@@ -46,10 +47,30 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
     "collect.fold_repeats": {"label": "折叠重复刷屏", "hint": "同一句话重复多次时折叠成一条并标注次数。"},
     "render.backend": {"label": "渲染链路", "hint": "决定卡片图片由谁来出。"},
     "render.theme": {"label": "默认卡片主题", "hint": "群内可用「棱镜主题」单独覆盖。"},
-    "render.image_quality": {"label": "图片质量", "hint": "JPEG 质量，越高越清晰也越大。"},
+    "render.card_scale": {
+        "label": "卡片清晰度",
+        "hint": "以百分比放大卡片像素。200 = 两倍分辨率，越高越清晰也越大越慢。",
+    },
+    "render.image_format": {
+        "label": "图片格式",
+        "hint": "jpeg 体积小；png 无损、文字边缘最锐利但文件更大。",
+    },
+    "render.image_quality": {"label": "图片质量", "hint": "仅 jpeg 生效，越高越清晰也越大。"},
     "render.show_evidence": {"label": "展示原话证据", "hint": "关闭后卡片不再引用群友原话。"},
     "render.show_avatar": {"label": "展示头像", "hint": "关闭后只显示昵称首字。"},
     "render.footer_note": {"label": "卡片署名", "hint": "显示在卡片右下角。"},
+    "render.font_family": {
+        "label": "正文字体",
+        "hint": "留空沿用主题自带字体栈。可写多个字体名，用逗号分隔。",
+    },
+    "render.font_title_family": {
+        "label": "标题字体",
+        "hint": "留空则跟随正文字体。",
+    },
+    "render.font_source": {
+        "label": "自定义字体文件",
+        "hint": "本地字体路径或 http(s) 地址，支持 ttf/otf/woff/woff2，上限 8MB；本地文件会自动内嵌。",
+    },
     "limits.user_cooldown_sec": {"label": "同一发起人冷却", "hint": "单位秒，0 表示不限制。"},
     "limits.target_cooldown_sec": {"label": "同一目标冷却", "hint": "避免同一个人被反复刷画像。"},
     "limits.group_daily_quota": {"label": "单群每日上限", "hint": "0 表示不限制。"},
@@ -67,6 +88,22 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
     },
     "inject.max_chars": {"label": "注入字数上限", "hint": "超出会截断。"},
     "inject.max_age_days": {"label": "注入有效期", "hint": "超过这个天数的画像不再注入。"},
+    "persona_clone.enabled": {
+        "label": "启用人格克隆",
+        "hint": "关掉后「棱镜克隆」「克隆人格」「切换人格」全部停用。",
+    },
+    "persona_clone.require_admin": {
+        "label": "克隆仅限管理员",
+        "hint": "关掉即恢复上游行为：全群成员都能触发人格克隆。",
+    },
+    "persona_clone.clear_history_on_switch": {
+        "label": "切换人格时清空上下文",
+        "hint": "不清空的话新人格会带着旧人格的记忆说话，容易串味。",
+    },
+    "compat.legacy_commands": {
+        "label": "启用「画像」系列指令",
+        "hint": "画像 / 正画像 / 负画像 / 克隆人格 / 找对象 / 查看画像 / 切换人格 / 恢复人格。与上游插件同名，同时装两个请关掉一边。",
+    },
     "behavior.quiet_progress": {"label": "静默模式", "hint": "不发「正在分析」这类过程提示。"},
     "behavior.history_limit": {"label": "每人保留历史条数", "hint": "超出的旧记录自动清理。"},
     "behavior.allow_self_only": {"label": "只允许画自己", "hint": "开启后不能对他人发起画像。"},
@@ -82,7 +119,27 @@ GROUP_TITLES: dict[str, dict[str, str]] = {
     "inject": {"label": "对话注入", "icon": "chat"},
     "persona_clone": {"label": "人格克隆", "icon": "mask"},
     "behavior": {"label": "行为", "icon": "sliders"},
+    "compat": {"label": "上游兼容", "icon": "link"},
 }
+
+#: 提示词输出布局选项。前端下拉框直接渲染这份表。
+LAYOUT_CHOICES: list[dict[str, str]] = [
+    {
+        "value": "card",
+        "label": "结构化卡片",
+        "hint": "要求模型返回 JSON，渲染成带雷达图、标签、证据的信息卡。最好看，也最依赖模型的指令遵循能力。",
+    },
+    {
+        "value": "markdown",
+        "label": "长文卡片",
+        "hint": "让模型自由用 Markdown 写，再排版成长图卡。适合叙述型画像，对小模型更宽容。",
+    },
+    {
+        "value": "text",
+        "label": "纯文本",
+        "hint": "原样发文字，不出图。适合人格提示词这类需要复制粘贴的输出。",
+    },
+]
 
 #: 渲染链路选项的人话解释。
 BACKEND_CHOICES: list[dict[str, str]] = [
@@ -253,6 +310,12 @@ def _field_meta(path: str) -> dict[str, Any]:
     if path == "render.backend":
         meta["type"] = "choice"
         meta["choices"] = BACKEND_CHOICES
+    elif path == "render.image_format":
+        meta["type"] = "choice"
+        meta["choices"] = [
+            {"value": "jpeg", "label": "JPEG", "hint": "体积小，适合日常发群"},
+            {"value": "png", "label": "PNG", "hint": "无损，文字最锐利"},
+        ]
     elif path == "collect.sampling":
         meta["type"] = "choice"
         meta["choices"] = SAMPLING_CHOICES
@@ -321,10 +384,14 @@ def apply_settings(config: Any, payload: Any) -> dict[str, Any]:
 def build_prompts(store: Any, library: Any) -> dict[str, Any]:
     custom = store.list_prompt_entries()
     builtin = [spec.to_dict() for spec in library.all_specs() if spec.builtin]
+    # 老库里的自定义条目没有 layout，这里按 structured 推导补齐，前端就不用再猜。
+    for row in custom:
+        row["layout"] = normalize_layout(row.get("layout"), bool(row.get("structured", True)))
     return {
         "ok": True,
         "builtin": builtin,
         "custom": custom,
+        "layouts": LAYOUT_CHOICES,
         "reserved_commands": sorted({spec.command for spec in library.all_specs() if spec.builtin}),
     }
 
@@ -348,12 +415,22 @@ def validate_prompt_payload(payload: Any, *, reserved: set[str]) -> dict[str, An
         raise DashboardError("提示词内容太短，至少写 10 个字。")
     if len(prompt) > 8000:
         raise DashboardError("提示词内容过长（上限 8000 字）。")
+    # layout 是新字段，给出合法值时以它为准（structured 只是它的派生标记）；
+    # 老客户端只发 structured，这时再按 structured 反推 layout。
+    raw_layout = str(payload.get("layout") or "").strip().lower()
+    if raw_layout in VALID_LAYOUTS:
+        layout = raw_layout
+        structured = layout == "card"
+    else:
+        structured = bool(payload.get("structured", True))
+        layout = normalize_layout(raw_layout, structured)
     return {
         "key": key,
         "command": command,
         "label": label,
         "prompt": prompt,
-        "structured": bool(payload.get("structured", True)),
+        "structured": structured,
+        "layout": layout,
         "enabled": bool(payload.get("enabled", True)),
     }
 
@@ -362,6 +439,7 @@ __all__ = [
     "BACKEND_CHOICES",
     "FIELD_HINTS",
     "GROUP_TITLES",
+    "LAYOUT_CHOICES",
     "SAMPLING_CHOICES",
     "DashboardError",
     "apply_settings",

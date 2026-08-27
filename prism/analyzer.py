@@ -20,6 +20,9 @@ from typing import Any
 from .models import CorpusBundle, MemberProfile, Portrait, Section
 from .prompts import PromptSpec, build_system_prompt, build_user_prompt
 
+#: 需要把「和谁互动过」喂给模型的玩法。姻缘/综合画像/红娘都要看社交痕迹。
+_PARTNER_KEYS = frozenset({"match", "portrait", "legacy_match", "legacy_portrait"})
+
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 _SMART_QUOTES = {
     "\u201c": '"',
@@ -212,7 +215,7 @@ class PrismAnalyzer:
             group_name=group_name,
             profile=profile,
             profile_fields=self._config.profile_fields(),
-            include_partners=spec.key in {"match", "portrait"} or not spec.builtin,
+            include_partners=spec.key in _PARTNER_KEYS or not spec.builtin,
         )
         model = self._config.str_of("llm.model")
         timeout = max(30, self._config.int_of("llm.timeout_sec"))

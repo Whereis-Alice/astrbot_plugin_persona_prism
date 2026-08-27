@@ -14,13 +14,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import html
 import math
 import re
 import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -92,6 +93,15 @@ class CardContext:
     show_evidence: bool = True
     show_avatar: bool = True
     created_at: int = field(default_factory=lambda: int(time.time()))
+    #: CSS 层面的整体放大倍数。1.0 表示不放大。
+    #: 官方 t2i 端点不接受 viewport / device_scale_factor，只能靠 CSS zoom 提清晰度。
+    zoom: float = 1.0
+    #: 正文 / 标题字体族覆盖（留空表示沿用主题自带字体栈）。
+    font_family: str = ""
+    font_title_family: str = ""
+    #: 自定义字体的 @font-face src。可以是 http(s) URL，也可以是 data URI。
+    font_src: str = ""
+    font_name: str = ""
 
 
 @dataclass(slots=True)
@@ -109,12 +119,26 @@ class RenderResult:
 # ---------------------------------------------------------------------------
 
 
+#: 雷达图画布。轴标签画在图形外侧，所以画布必须比 2×半径 明显宽，
+#: 否则四周的标签会被 SVG 视口裁掉（表现为「作息规律」只剩「息规律」）。
+RADAR_BOX_W = 300
+RADAR_BOX_H = 268
+RADAR_CX = 150.0
+RADAR_CY = 132.0
+RADAR_R = 84.0
+RADAR_LABEL_GAP = 15.0
+#: 轴标签最多显示几个字。维度名由模型生成，长名字会顶穿画布，
+#: 完整名字在右侧的评分条里照样能看到，这里截断不丢信息。
+RADAR_LABEL_MAX = 6
+
+
 def radar_geometry(
     scores: list[int],
     *,
-    cx: float = 130.0,
-    cy: float = 130.0,
-    radius: float = 96.0,
+    cx: float = RADAR_CX,
+    cy: float = RADAR_CY,
+    radius: float = RADAR_R,
+    label_gap: float = RADAR_LABEL_GAP,
 ) -> dict[str, Any]:
     """算出雷达图需要的所有坐标。
 
@@ -142,8 +166,8 @@ def radar_geometry(
         )
         labels.append(
             {
-                "x": cx + (radius + 18) * math.cos(angle),
-                "y": cy + (radius + 18) * math.sin(angle),
+                "x": cx + (radius + label_gap) * math.cos(angle),
+                "y": cy + (radius + label_gap) * math.sin(angle),
             },
         )
     rings = []
@@ -168,12 +192,16 @@ def _radar_svg(portrait: Portrait) -> str:
     if len(dims) < 3:
         return ""
     geo = radar_geometry([d.score for d in dims])
-    parts: list[str] = ['<svg class="radar" viewBox="0 0 260 260" width="260" height="260">']
+    parts: list[str] = [
+        f'<svg class="radar" viewBox="0 0 {RADAR_BOX_W} {RADAR_BOX_H}"'
+        f' width="{RADAR_BOX_W}" height="{RADAR_BOX_H}">',
+    ]
     for ring in geo["rings"]:
         parts.append(f'<polygon class="ring" points="{ring}"/>')
     for axis in geo["axes"]:
         parts.append(
-            f'<line class="axis" x1="130" y1="130" x2="{axis["x"]:.1f}" y2="{axis["y"]:.1f}"/>',
+            f'<line class="axis" x1="{RADAR_CX:.1f}" y1="{RADAR_CY:.1f}"'
+            f' x2="{axis["x"]:.1f}" y2="{axis["y"]:.1f}"/>',
         )
     parts.append(f'<polygon class="shape" points="{geo["polygon"]}"/>')
     for point in geo["polygon"].split(" "):
@@ -182,14 +210,16 @@ def _radar_svg(portrait: Portrait) -> str:
         x, _, y = point.partition(",")
         parts.append(f'<circle class="dot" cx="{x}" cy="{y}" r="3"/>')
     for dim, label in zip(dims, geo["labels"], strict=False):
+        # 左右两侧的标签向外对齐，正上/正下居中，这样文字始终朝画布内侧生长。
         anchor = "middle"
-        if label["x"] > 145:
+        if label["x"] > RADAR_CX + 12:
             anchor = "start"
-        elif label["x"] < 115:
+        elif label["x"] < RADAR_CX - 12:
             anchor = "end"
+        name = dim.name if len(dim.name) <= RADAR_LABEL_MAX else dim.name[: RADAR_LABEL_MAX - 1] + "…"
         parts.append(
             f'<text class="radar-label" x="{label["x"]:.1f}" y="{label["y"]:.1f}"'
-            f' text-anchor="{anchor}">{_esc(dim.name)}</text>',
+            f' text-anchor="{anchor}">{_esc(name)}</text>',
         )
     parts.append("</svg>")
     return "".join(parts)
@@ -287,15 +317,15 @@ body {
   content: ""; flex: 1; height: 1px; background: var(--rule);
 }
 
-.metrics { display: flex; gap: 26px; align-items: center; }
-.radar-box { flex: 0 0 260px; }
+.metrics { display: flex; gap: 20px; align-items: center; }
+.radar-box { flex: 0 0 300px; }
 .radar .ring { fill: none; stroke: var(--rule); stroke-width: 1; }
 .radar .axis { stroke: var(--rule); stroke-width: 1; }
 .radar .shape {
   fill: var(--radar-fill); stroke: var(--accent); stroke-width: 2;
 }
 .radar .dot { fill: var(--accent); }
-.radar-label { font-size: 12px; fill: var(--ink-dim); font-family: var(--font-body); }
+.radar-label { font-size: 11.5px; fill: var(--ink-dim); font-family: var(--font-body); }
 
 .dims { flex: 1; display: flex; flex-direction: column; gap: 13px; }
 .dim-head { display: flex; justify-content: space-between; align-items: baseline; }
@@ -567,6 +597,112 @@ _EXTRA_CSS = """
 .empty { font-size: 14px; color: var(--ink-mute); }
 """
 
+#: Markdown 卡片专用样式（"画像"系列的自由排版输出走这套）。
+_MD_CSS = """
+:root { --font-mono: "JetBrains Mono","Cascadia Code","DejaVu Sans Mono",Consolas,Menlo,monospace; }
+.md-body { margin-top: 26px; font-size: 15px; line-height: 1.85; color: var(--ink); }
+.md-body > *:first-child { margin-top: 0; }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 {
+  font-family: var(--font-title);
+  color: var(--ink-strong);
+  line-height: 1.35;
+}
+.md-body h1 { font-size: 25px; margin: 26px 0 12px; }
+.md-body h2 {
+  font-size: 20px;
+  margin: 26px 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--rule);
+}
+.md-body h3 { font-size: 17px; margin: 20px 0 8px; color: var(--accent-ink); }
+.md-body h4, .md-body h5, .md-body h6 { font-size: 15px; margin: 16px 0 6px; }
+.md-body p { margin: 10px 0; }
+.md-body strong { color: var(--ink-strong); font-weight: 700; }
+.md-body em { color: var(--accent-ink); font-style: italic; }
+.md-body del { color: var(--ink-mute); }
+.md-body a { color: var(--accent); text-decoration: none; border-bottom: 1px dashed var(--accent-soft); }
+.md-body ul.md-list, .md-body ol.md-list { margin: 10px 0 10px 4px; padding-left: 22px; }
+.md-body ul.md-list { list-style: none; padding-left: 4px; }
+.md-body ul.md-list > li { position: relative; padding-left: 20px; margin: 7px 0; }
+.md-body ul.md-list > li::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: .68em;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: .85;
+}
+.md-body ol.md-list > li { margin: 7px 0; }
+.md-body ol.md-list > li::marker { color: var(--accent); font-family: var(--font-title); }
+.md-body blockquote {
+  margin: 14px 0;
+  padding: 12px 18px;
+  border-left: 3px solid var(--accent-soft);
+  border-radius: 0 12px 12px 0;
+  background: var(--quote-bg);
+  color: var(--ink-dim);
+  font-size: 14px;
+}
+.md-body hr.md-hr { margin: 22px 0; border: none; border-top: 1px solid var(--rule); }
+.md-body code {
+  font-family: var(--font-mono);
+  font-size: .92em;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--chip-bg);
+  color: var(--accent-ink);
+}
+.md-body .md-code {
+  position: relative;
+  margin: 16px 0;
+  border-radius: 14px;
+  border: 1px solid var(--rule);
+  background: var(--quote-bg);
+  overflow: hidden;
+}
+.md-body .md-code-lang {
+  font-family: var(--font-title);
+  font-size: 11px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  padding: 7px 16px;
+  color: var(--ink-mute);
+  border-bottom: 1px solid var(--rule);
+}
+.md-body .md-code pre { padding: 14px 18px; overflow: hidden; }
+.md-body .md-code code {
+  display: block;
+  padding: 0;
+  background: none;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.72;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.md-body table.md-table {
+  width: 100%;
+  margin: 16px 0;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+.md-body table.md-table th, .md-body table.md-table td {
+  padding: 9px 12px;
+  border: 1px solid var(--rule);
+  text-align: left;
+  vertical-align: top;
+}
+.md-body table.md-table th {
+  font-family: var(--font-title);
+  color: var(--ink-strong);
+  background: var(--chip-bg);
+}
+.foot.foot-md { justify-content: flex-end; }
+"""
+
 _CONF_LEVELS = ((0.8, "高"), (0.6, "中"), (0.0, "低"))
 
 
@@ -723,6 +859,169 @@ def _foot_html(portrait: Portrait, ctx: CardContext) -> str:
     )
 
 
+#: 自定义字体缺省时的兜底字体栈（覆盖 Windows / macOS / Linux 常见中文字体）。
+FONT_FALLBACK = (
+    '"Noto Sans SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",'
+    '"Hiragino Sans GB","WenQuanYi Micro Hei",sans-serif'
+)
+
+#: 字体 URL 里一律剔除的字符，避免拼进 url("...") 时闭合引号或注入额外声明。
+_FONT_SRC_BAD_RE = re.compile(r"""[\s"'()<>\\{}]""")
+#: 字体族名只保留字母数字、中文、空格、逗号、连字符、下划线和点。
+_FONT_FAMILY_BAD_RE = re.compile(r"""[^\w\u4e00-\u9fff .,\-]""")
+
+
+def sanitize_font_src(value: str) -> str:
+    """清洗自定义字体地址。只接受 http(s) URL 与 data URI。"""
+    cleaned = _FONT_SRC_BAD_RE.sub("", str(value or "").strip())
+    if not cleaned:
+        return ""
+    lowered = cleaned.lower()
+    if lowered.startswith(("http://", "https://", "data:")):
+        return cleaned
+    return ""
+
+
+def sanitize_font_family(value: str) -> str:
+    """清洗字体族名，顺手补齐兜底字体栈。"""
+    cleaned = _FONT_FAMILY_BAD_RE.sub("", str(value or "").strip()).strip(" ,")
+    if not cleaned:
+        return ""
+    names = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if not names:
+        return ""
+    quoted = [name if name.isascii() and " " not in name else f'"{name}"' for name in names]
+    return ", ".join(quoted)
+
+
+#: 允许内嵌的字体扩展名 → data URI 的 MIME。
+FONT_MIME_BY_SUFFIX: dict[str, str] = {
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
+    ".ttc": "font/collection",
+}
+
+#: 单个内嵌字体的体积上限。超过就拒绝，避免把几十 MB 塞进 HTML 传给 t2i。
+FONT_MAX_BYTES = 8 * 1024 * 1024
+
+#: 本地字体 → data URI 的内存缓存，键含 mtime / size，换字体会自动失效。
+_FONT_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def resolve_font_source(value: str, *, logger: Any = None) -> str:
+    """把 render.font_source 解析成可直接写进 @font-face 的 src。
+
+    * http(s) URL / data URI —— 原样使用。
+    * 本地字体文件 —— 读成 base64 data URI 内嵌。必须内嵌，因为官方 t2i 端点
+      在远端渲染，读不到本机磁盘上的字体文件。
+    """
+    raw = str(value or "").strip().strip('"').strip("'")
+    if not raw:
+        return ""
+    if raw.lower().startswith(("http://", "https://", "data:")):
+        return sanitize_font_src(raw)
+
+    path = Path(raw).expanduser()
+    suffix = path.suffix.lower()
+    mime = FONT_MIME_BY_SUFFIX.get(suffix)
+    if mime is None:
+        if logger is not None:
+            logger.warning(
+                f"[persona_prism] 不支持的字体格式 {suffix or '(无扩展名)'}，"
+                f"仅支持 {'/'.join(FONT_MIME_BY_SUFFIX)}",
+            )
+        return ""
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        if logger is not None:
+            logger.warning(f"[persona_prism] 读不到字体文件 {path}：{exc}")
+        return ""
+    if stat.st_size > FONT_MAX_BYTES:
+        if logger is not None:
+            logger.warning(
+                f"[persona_prism] 字体文件过大（{stat.st_size / 1048576:.1f} MB > "
+                f"{FONT_MAX_BYTES // 1048576} MB），已忽略：{path}",
+            )
+        return ""
+    cache_key = (str(path), int(stat.st_mtime), int(stat.st_size))
+    cached = _FONT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    except OSError as exc:
+        if logger is not None:
+            logger.warning(f"[persona_prism] 字体文件读取失败 {path}：{exc}")
+        return ""
+    encoded = f"data:{mime};base64,{payload}"
+    _FONT_CACHE.clear()
+    _FONT_CACHE[cache_key] = encoded
+    return encoded
+
+
+def _font_css(ctx: CardContext) -> str:
+    """生成放在所有主题样式之后的字体覆盖片段。
+
+    主题 CSS 用 --font-body / --font-title 两个变量描述字体，这里最后写一次
+    同名变量即可覆盖，不需要改动任何主题。
+    """
+    src = sanitize_font_src(ctx.font_src)
+    name = sanitize_font_family(ctx.font_name) or '"PrismCustomFont"'
+    body = sanitize_font_family(ctx.font_family)
+    title = sanitize_font_family(ctx.font_title_family)
+    parts: list[str] = []
+    if src:
+        parts.append(
+            f"@font-face{{font-family:{name};src:url({src});font-display:block;"
+            f"font-weight:100 900;font-style:normal;}}",
+        )
+        if not body:
+            body = f"{name}, {FONT_FALLBACK}"
+        if not title:
+            title = body
+    decls: list[str] = []
+    if body:
+        decls.append(f"--font-body:{body};")
+    if title:
+        decls.append(f"--font-title:{title};")
+    if decls:
+        parts.append("".join([":root{", *decls, "}"]))
+    return "".join(parts)
+
+
+def _zoom_css(ctx: CardContext) -> str:
+    """整体放大。t2i 端点不给 device_scale_factor，只能用 CSS zoom 换清晰度。"""
+    try:
+        zoom = float(ctx.zoom or 1.0)
+    except (TypeError, ValueError):
+        return ""
+    zoom = max(1.0, min(4.0, zoom))
+    if abs(zoom - 1.0) < 1e-6:
+        return ""
+    value = f"{zoom:.4f}".rstrip("0").rstrip(".")
+    return f"html{{zoom:{value};}}"
+
+
+def _document(ctx: CardContext, css: str, inner: str, *, badge: str = "") -> str:
+    """统一的外层文档骨架。"""
+    badge_html = f'<div class="badge">{_esc(badge)}</div>' if badge else ""
+    markup = (
+        "<!DOCTYPE html>"
+        '<html lang="zh-CN"><head><meta charset="utf-8"/>'
+        f"<title>{_esc(ctx.title)}</title>"
+        f"<style>{css}{_font_css(ctx)}{_zoom_css(ctx)}</style></head><body>"
+        '<div class="wrap"><div class="card">'
+        f"{badge_html}"
+        '<div class="inner">'
+        f"{inner}"
+        "</div></div></div></body></html>"
+    )
+    return neutralize_jinja(markup)
+
+
 def build_card_html(portrait: Portrait, ctx: CardContext) -> str:
     """把画像渲染成一份自包含的完整 HTML 文档。
 
@@ -751,18 +1050,245 @@ def build_card_html(portrait: Portrait, ctx: CardContext) -> str:
     if ctx.sample_size and ctx.sample_size < 20:
         body += '<div class="note">样本偏少，结论仅作参考；多聊几天后重新生成会更准。</div>'
 
-    markup = (
-        "<!DOCTYPE html>"
-        '<html lang="zh-CN"><head><meta charset="utf-8"/>'
-        f"<title>{_esc(ctx.title)}</title>"
-        f"<style>{css}</style></head><body>"
-        '<div class="wrap"><div class="card">'
-        f'<div class="badge">{_esc(theme_label(theme))}</div>'
-        '<div class="inner">'
-        f"{_hero_html(ctx)}{body}{_foot_html(portrait, ctx)}"
-        "</div></div></div></body></html>"
+    inner = f"{_hero_html(ctx)}{body}{_foot_html(portrait, ctx)}"
+    return _document(ctx, css, inner, badge=theme_label(theme))
+
+
+# ---------------------------------------------------------------------------
+# Markdown 卡片（兼容"画像"系列的自由排版输出）
+# ---------------------------------------------------------------------------
+
+_MD_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})\s*([\w+#-]*)\s*$")
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_MD_HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+_MD_QUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
+_MD_UL_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
+_MD_OL_RE = re.compile(r"^(\s*)(\d{1,3})[.)]\s+(.*)$")
+_MD_TABLE_SPLIT_RE = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$")
+
+_MD_CODE_RE = re.compile(r"`([^`\n]+)`")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
+_MD_BOLD2_RE = re.compile(r"__(.+?)__", re.S)
+_MD_ITALIC_RE = re.compile(r"(?<![\w*])\*([^*\n]+?)\*(?![\w*])")
+_MD_DEL_RE = re.compile(r"~~(.+?)~~", re.S)
+_MD_LINK_RE = re.compile(r"\[([^\]\n]*)\]\(([^)\s]+)\)")
+_MD_SAFE_URL_RE = re.compile(r"^(?:https?://|mailto:)", re.I)
+
+
+def _md_inline(text: str) -> str:
+    """把一行 Markdown 行内标记转成 HTML。
+
+    先整体转义再上标记，所以语料里任何 <script> 之类的东西都只会变成字面量。
+    """
+    escaped = _esc(text)
+    slots: list[str] = []
+
+    def _stash(match: re.Match[str]) -> str:
+        slots.append(f"<code>{match.group(1)}</code>")
+        return f"\x00{len(slots) - 1}\x00"
+
+    escaped = _MD_CODE_RE.sub(_stash, escaped)
+    escaped = _MD_BOLD_RE.sub(r"<strong>\1</strong>", escaped)
+    escaped = _MD_BOLD2_RE.sub(r"<strong>\1</strong>", escaped)
+    escaped = _MD_ITALIC_RE.sub(r"<em>\1</em>", escaped)
+    escaped = _MD_DEL_RE.sub(r"<del>\1</del>", escaped)
+
+    def _link(match: re.Match[str]) -> str:
+        label = match.group(1) or match.group(2)
+        url = html.unescape(match.group(2))
+        if not _MD_SAFE_URL_RE.match(url):
+            return label
+        return f'<a href="{_esc(url)}">{label}</a>'
+
+    escaped = _MD_LINK_RE.sub(_link, escaped)
+    for index, value in enumerate(slots):
+        escaped = escaped.replace(f"\x00{index}\x00", value)
+    return escaped
+
+
+def _md_table(rows: list[str]) -> str:
+    def cells(line: str) -> list[str]:
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            stripped = stripped[1:]
+        if stripped.endswith("|"):
+            stripped = stripped[:-1]
+        return [cell.strip() for cell in stripped.split("|")]
+
+    head = cells(rows[0])
+    body = [cells(line) for line in rows[2:]]
+    width = max([len(head)] + [len(row) for row in body] or [0])
+    parts = ["<table class=\"md-table\"><thead><tr>"]
+    for index in range(width):
+        parts.append(f"<th>{_md_inline(head[index] if index < len(head) else '')}</th>")
+    parts.append("</tr></thead><tbody>")
+    for row in body:
+        parts.append("<tr>")
+        for index in range(width):
+            parts.append(f"<td>{_md_inline(row[index] if index < len(row) else '')}</td>")
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def markdown_to_html(source: str) -> str:
+    """一个刚好够用的 Markdown 子集渲染器。
+
+    只支持标题、有序/无序列表、代码块、引用、分割线、简单表格和常见行内标记，
+    不引入任何第三方依赖，且所有文本都会先经过 HTML 转义。
+    """
+    lines = str(source or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out: list[str] = []
+    para: list[str] = []
+    quote: list[str] = []
+    list_stack: list[str] = []
+
+    def flush_para() -> None:
+        if para:
+            out.append("<p>" + "<br/>".join(_md_inline(line) for line in para) + "</p>")
+            para.clear()
+
+    def flush_quote() -> None:
+        if quote:
+            out.append(
+                "<blockquote>"
+                + "<br/>".join(_md_inline(line) for line in quote)
+                + "</blockquote>",
+            )
+            quote.clear()
+
+    def flush_list() -> None:
+        while list_stack:
+            out.append(f"</{list_stack.pop()}>")
+
+    def flush_all() -> None:
+        flush_para()
+        flush_quote()
+        flush_list()
+
+    index = 0
+    total = len(lines)
+    while index < total:
+        line = lines[index]
+
+        fence = _MD_FENCE_RE.match(line)
+        if fence:
+            flush_all()
+            marker = fence.group(1)[0]
+            lang = fence.group(2) or ""
+            index += 1
+            buffer: list[str] = []
+            while index < total:
+                candidate = _MD_FENCE_RE.match(lines[index])
+                if candidate and candidate.group(1)[0] == marker:
+                    index += 1
+                    break
+                buffer.append(lines[index])
+                index += 1
+            label = f'<div class="md-code-lang">{_esc(lang)}</div>' if lang else ""
+            out.append(
+                f'<div class="md-code">{label}<pre><code>{_esc(chr(10).join(buffer))}'
+                "</code></pre></div>",
+            )
+            continue
+
+        if not line.strip():
+            flush_all()
+            index += 1
+            continue
+
+        if _MD_HR_RE.match(line) and not _MD_UL_RE.match(line.rstrip()):
+            flush_all()
+            out.append('<hr class="md-hr"/>')
+            index += 1
+            continue
+
+        heading = _MD_HEADING_RE.match(line)
+        if heading:
+            flush_all()
+            level = min(6, max(1, len(heading.group(1))))
+            out.append(f"<h{level}>{_md_inline(heading.group(2).strip())}</h{level}>")
+            index += 1
+            continue
+
+        quoted = _MD_QUOTE_RE.match(line)
+        if quoted:
+            flush_para()
+            flush_list()
+            quote.append(quoted.group(1))
+            index += 1
+            continue
+
+        if (
+            "|" in line
+            and index + 1 < total
+            and "|" in lines[index + 1]
+            and _MD_TABLE_SPLIT_RE.match(lines[index + 1])
+        ):
+            flush_all()
+            rows = [line, lines[index + 1]]
+            index += 2
+            while index < total and "|" in lines[index] and lines[index].strip():
+                rows.append(lines[index])
+                index += 1
+            out.append(_md_table(rows))
+            continue
+
+        bullet = _MD_UL_RE.match(line)
+        ordered = _MD_OL_RE.match(line) if not bullet else None
+        if bullet or ordered:
+            flush_para()
+            flush_quote()
+            tag = "ul" if bullet else "ol"
+            content = bullet.group(2) if bullet else ordered.group(3)
+            if not list_stack:
+                out.append(f'<{tag} class="md-list">')
+                list_stack.append(tag)
+            elif list_stack[-1] != tag:
+                out.append(f"</{list_stack.pop()}>")
+                out.append(f'<{tag} class="md-list">')
+                list_stack.append(tag)
+            out.append(f"<li>{_md_inline(content.strip())}</li>")
+            index += 1
+            continue
+
+        flush_quote()
+        flush_list()
+        para.append(line.strip())
+        index += 1
+
+    flush_all()
+    return "".join(out)
+
+
+def build_markdown_card_html(
+    source: str,
+    ctx: CardContext,
+    *,
+    footer_lines: list[str] | None = None,
+) -> str:
+    """把一段 Markdown 正文渲染成与画像卡片同主题的完整 HTML 文档。"""
+    theme = normalize_theme(ctx.theme)
+    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS + _MD_CSS
+    body = markdown_to_html(source)
+    if not body:
+        body = '<div class="empty">这次没有解析到可展示的内容。</div>'
+    lines = list(footer_lines or [])
+    if not lines:
+        lines = [ctx.footer_note or "人格棱镜 · Persona Prism"]
+        if ctx.model:
+            lines.append(f"模型 {ctx.model}")
+        lines.append("内容由 AI 生成，仅供娱乐")
+    sign = "<br/>".join(
+        (f"<strong>{_esc(item)}</strong>" if pos == 0 else _esc(item))
+        for pos, item in enumerate(lines)
     )
-    return neutralize_jinja(markup)
+    inner = (
+        f"{_hero_html(ctx)}"
+        f'<div class="md-body">{body}</div>'
+        f'<div class="foot foot-md"><div class="sign">{sign}</div></div>'
+    )
+    return _document(ctx, css, inner, badge=theme_label(theme))
 
 
 # ---------------------------------------------------------------------------
@@ -817,9 +1343,65 @@ class CardRenderer:
 
     def _quality(self) -> int:
         try:
-            return max(40, min(100, int(self._config.int_of("render.image_quality"))))
+            return max(60, min(100, int(self._config.int_of("render.image_quality"))))
         except Exception:
-            return 85
+            return 92
+
+    def _scale(self) -> float:
+        """卡片放大倍数。100 = 原尺寸，200 = 两倍像素。"""
+        try:
+            percent = int(self._config.int_of("render.card_scale"))
+        except Exception:
+            percent = 200
+        return max(100, min(300, percent)) / 100.0
+
+    def _image_format(self) -> str:
+        try:
+            fmt = str(self._config.str_of("render.image_format") or "").strip().lower()
+        except Exception:
+            fmt = ""
+        return "png" if fmt == "png" else "jpeg"
+
+    def _shot_options(self) -> dict[str, Any]:
+        """截图参数。png 是无损格式，传 quality 会被 Playwright 直接拒绝。"""
+        fmt = self._image_format()
+        options: dict[str, Any] = {"full_page": True, "type": fmt}
+        if fmt == "jpeg":
+            options["quality"] = self._quality()
+        return options
+
+    def _suffix(self) -> str:
+        return ".png" if self._image_format() == "png" else ".jpg"
+
+    def _ctx_for(self, ctx: CardContext, backend: str) -> CardContext:
+        """按后端决定放大方式。
+
+        官方 t2i 端点只接受 Playwright 的截图参数，没有 viewport /
+        device_scale_factor，所以那一层只能靠 CSS zoom 提清晰度；本地 Playwright
+        由我们自己开浏览器，用 device_scale_factor 更稳（完全不影响布局）。
+        """
+        zoom = self._scale() if backend == "t2i" else 1.0
+        body, title, src = self._font_setting()
+        return replace(
+            ctx,
+            zoom=zoom,
+            font_family=body or ctx.font_family,
+            font_title_family=title or ctx.font_title_family,
+            font_src=src or ctx.font_src,
+        )
+
+    def _font_setting(self) -> tuple[str, str, str]:
+        """读一次字体配置。任何异常都退回"用主题自带字体"。"""
+        try:
+            body = self._config.str_of("render.font_family")
+            title = self._config.str_of("render.font_title_family")
+            source = self._config.str_of("render.font_source")
+        except Exception:
+            return "", "", ""
+        resolved = resolve_font_source(source, logger=self._log) if source else ""
+        if source and not resolved:
+            self._warn(f"[persona_prism] 自定义字体不可用，已回退默认字体：{source}")
+        return body, title, resolved
 
     def _timeout(self) -> float:
         try:
@@ -862,7 +1444,7 @@ class CardRenderer:
         """
         if self._star is None:
             return ""
-        options = {"full_page": True, "type": "jpeg", "quality": self._quality()}
+        options = self._shot_options()
         result = await asyncio.wait_for(
             self._star.html_render(markup, {}, return_url=False, options=options),
             timeout=self._timeout(),
@@ -884,24 +1466,19 @@ class CardRenderer:
             self._debug("[persona_prism] 未安装 playwright，跳过本地 HTML 渲染层")
             return ""
         self._cards_dir.mkdir(parents=True, exist_ok=True)
-        out = self._cards_dir / f"_tmp_{int(time.time() * 1000)}.jpg"
+        out = self._cards_dir / f"_tmp_{int(time.time() * 1000)}{self._suffix()}"
         try:
             async with async_playwright() as pw:
                 browser = await pw.chromium.launch(args=["--no-sandbox"])
                 try:
                     page = await browser.new_page(
                         viewport={"width": 968, "height": 1400},
-                        device_scale_factor=2,
+                        device_scale_factor=self._scale(),
                     )
                     await page.set_content(markup, wait_until="load")
                     with contextlib.suppress(Exception):
                         await page.wait_for_load_state("networkidle", timeout=6000)
-                    await page.screenshot(
-                        path=str(out),
-                        full_page=True,
-                        type="jpeg",
-                        quality=self._quality(),
-                    )
+                    await page.screenshot(path=str(out), **self._shot_options())
                 finally:
                     await browser.close()
         except Exception:
@@ -920,14 +1497,14 @@ class CardRenderer:
         return str(result or "")
 
     # -- 入口 ---------------------------------------------------------------
-    async def render(
+    async def _run(
         self,
-        portrait: Portrait,
+        build: Any,
+        text: str,
         ctx: CardContext,
-        record_key: str = "",
+        record_key: str,
     ) -> RenderResult:
-        text = portrait.to_plain_text(ctx.title)
-        markup = build_card_html(portrait, ctx)
+        """按 backend 顺序逐层尝试。build(ctx) 负责产出该层要用的 HTML。"""
         temps: list[Path] = []
         try:
             for backend in self.backends():
@@ -935,9 +1512,11 @@ class CardRenderer:
                     break
                 try:
                     if backend == "t2i":
-                        produced = await self._render_network(markup)
+                        produced = await self._render_network(build(self._ctx_for(ctx, backend)))
                     elif backend == "playwright":
-                        produced = await self._render_playwright(markup)
+                        produced = await self._render_playwright(
+                            build(self._ctx_for(ctx, backend)),
+                        )
                     else:
                         produced = await self._render_pil(text)
                 except asyncio.CancelledError:
@@ -966,18 +1545,60 @@ class CardRenderer:
                     temp.unlink(missing_ok=True)
         return RenderResult(backend="text", text=text)
 
+    async def render(
+        self,
+        portrait: Portrait,
+        ctx: CardContext,
+        record_key: str = "",
+    ) -> RenderResult:
+        """渲染结构化画像卡片。"""
+        return await self._run(
+            lambda scoped: build_card_html(portrait, scoped),
+            portrait.to_plain_text(ctx.title),
+            ctx,
+            record_key,
+        )
+
+    async def render_markdown(
+        self,
+        source: str,
+        ctx: CardContext,
+        record_key: str = "",
+        *,
+        footer_lines: list[str] | None = None,
+    ) -> RenderResult:
+        """渲染 Markdown 正文卡片（"画像"系列玩法用）。"""
+        return await self._run(
+            lambda scoped: build_markdown_card_html(
+                source,
+                scoped,
+                footer_lines=footer_lines,
+            ),
+            str(source or ""),
+            ctx,
+            record_key,
+        )
+
 
 __all__ = [
     "BACKEND_LABELS",
     "DEFAULT_THEME",
+    "FONT_FALLBACK",
+    "FONT_MAX_BYTES",
+    "FONT_MIME_BY_SUFFIX",
     "THEMES",
     "CardContext",
     "CardRenderer",
     "RenderResult",
     "build_card_html",
+    "build_markdown_card_html",
     "confidence_label",
+    "markdown_to_html",
     "neutralize_jinja",
     "normalize_theme",
     "radar_geometry",
+    "resolve_font_source",
+    "sanitize_font_family",
+    "sanitize_font_src",
     "theme_label",
 ]
