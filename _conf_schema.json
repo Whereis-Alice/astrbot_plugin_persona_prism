@@ -46,7 +46,7 @@
         "description": "主动回溯翻页轮数",
         "type": "int",
         "default": 12,
-        "hint": "仅 QQ(aiocqhttp) 有效。每轮抓一页历史消息，页数越多越慢但语料越足。设 0 可完全关闭主动回溯。"
+        "hint": "仅 QQ(aiocqhttp) 有效。每轮抓一页历史消息，页数越多越慢但语料越足。设 0 可完全关闭主动回溯，此时样本不足的诊断会提示你回溯被关掉了。"
       },
       "page_size": {
         "description": "每页拉取条数",
@@ -368,10 +368,10 @@
     "type": "object",
     "items": {
       "quiet_progress": {
-        "description": "安静模式（不发『正在分析』提示）",
+        "description": "安静模式（不发进度提示）",
         "type": "bool",
         "default": false,
-        "hint": "开启后不再发送『正在分析…』这类过程提示，只回最终结果。"
+        "hint": "开启后不再发送开工提示与「已翻 N 页」这类过程提示，只回最终结果。样本不足时的采集诊断不受影响，仍会照常发出，方便判断历史回溯有没有成功。"
       },
       "history_limit": {
         "description": "每个用户保留的画像历史条数",

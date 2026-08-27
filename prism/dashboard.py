@@ -104,7 +104,10 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "启用「画像」系列指令",
         "hint": "画像 / 正画像 / 负画像 / 克隆人格 / 找对象 / 查看画像 / 切换人格 / 恢复人格。与上游插件同名，同时装两个请关掉一边。",
     },
-    "behavior.quiet_progress": {"label": "静默模式", "hint": "不发「正在分析」这类过程提示。"},
+    "behavior.quiet_progress": {
+        "label": "静默模式",
+        "hint": "不发进度提示；样本不足时的采集诊断仍会保留，方便排查回溯有没有成功。",
+    },
     "behavior.history_limit": {"label": "每人保留历史条数", "hint": "超出的旧记录自动清理。"},
     "behavior.allow_self_only": {"label": "只允许画自己", "hint": "开启后不能对他人发起画像。"},
     "behavior.enabled_groups": {"label": "生效群列表", "hint": "留空表示所有群都生效。"},

@@ -25,7 +25,7 @@ from astrbot.core.star import StarTools
 from astrbot.core.star.filter.event_message_type import EventMessageType
 from quart import jsonify, request
 
-from .prism import cards, collector, dashboard
+from .prism import cards, collector, dashboard, scanning
 from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
 from .prism.config import ConfigError, PrismConfig
@@ -34,7 +34,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.1.1"
+PLUGIN_VERSION = "v1.1.2"
 
 #: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
 #: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
@@ -376,6 +376,20 @@ class PersonaPrismStar(Star):
         with contextlib.suppress(Exception):
             await self.astore.add_messages(platform, group_id, cleaned)
 
+    def _scan_plan(self, platform: str, group_id: str) -> scanning.ScanReport:
+        """按当前配置生成一份"回溯计划"。
+
+        既用于开工前那句"最多回溯 N 轮"的提示，也作为采集诊断的底稿。
+        """
+        return scanning.ScanReport(
+            platform=platform,
+            is_group=bool(group_id),
+            supported=scanning.supports_backfill(platform, group_id),
+            passive_capture=self.config.bool_of("collect.passive_capture"),
+            planned_rounds=max(0, self.config.int_of("collect.backfill_rounds")),
+            page_size=max(20, self.config.int_of("collect.page_size")),
+        )
+
     async def _backfill(
         self,
         event: AstrMessageEvent,
@@ -384,7 +398,8 @@ class PersonaPrismStar(Star):
         user_id: str,
         *,
         target_total: int,
-    ) -> int:
+        report: scanning.ScanReport,
+    ) -> scanning.ScanReport:
         """向更早的历史翻页，直到攒够目标条数或翻到头。
 
         与上游的差异：
@@ -394,24 +409,32 @@ class PersonaPrismStar(Star):
           尽头的群只补拉最新一页（补齐机器人离线期间漏掉的消息），不再无意义地
           继续往前翻。
         * 每页写库前先过滤本插件自己的指令消息。
+        * 过程逐项写进传入的 ScanReport（页数 / 原始条数 / 入库数 / 报错），
+          这样用户在群里就能看到"到底翻没翻、翻到了多少"，而不是只看到一句
+          "发言太少"。上游把这些数字刷在群里，我们只在需要解释结果时才说。
         """
         client = getattr(event, "bot", None)
         if client is None or not group_id:
-            return 0
+            #: 拿不到协议端客户端就等于不支持主动回溯，别让诊断误导用户。
+            report.supported = False
+            return report
 
         rounds = max(0, self.config.int_of("collect.backfill_rounds"))
         page_size = max(20, self.config.int_of("collect.page_size"))
+        report.planned_rounds = rounds
+        report.page_size = page_size
         state = await self.astore.get_scan_state(platform, group_id)
         #: 历史已经挖到最早一条。此时往前翻只会拿到空页，但机器人离线期间的新消息
         #: 被动采集是拿不到的，所以退化成"只补拉最新一页"，且不动断点。
         topup_only = bool(state.get("exhausted"))
+        report.topup_only = topup_only
         cursor = None if topup_only else (
             _as_int(state.get("oldest_seq")) if state.get("oldest_seq") else None
         )
         newest_seen = str(state.get("newest_seq") or "")
-        added = 0
         if topup_only:
             rounds = min(rounds, 1)
+        report.attempted = rounds > 0
 
         for index in range(rounds):
             seq = 0 if (index == 0 and cursor is None) else (cursor or 0)
@@ -425,14 +448,19 @@ class PersonaPrismStar(Star):
                 )
             except Exception as exc:
                 logger.debug("[人格棱镜] 拉取群历史失败（第 %s 页）：%s", index + 1, exc)
+                report.error = scanning.brief_error(exc)
                 break
 
             messages = (payload or {}).get("messages") if isinstance(payload, dict) else payload
             if not messages:
                 if not topup_only:
                     await self.astore.set_scan_state(platform, group_id, exhausted=True)
+                report.exhausted = True
                 break
 
+            report.pages += 1
+            if isinstance(messages, (list, tuple)):
+                report.scanned += len(messages)
             rows = collector.parse_history_page(messages)
             rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
             cleaned = collector.clean_rows(
@@ -443,7 +471,7 @@ class PersonaPrismStar(Star):
                 redact=self.config.bool_of("privacy.redact_pii"),
             )
             if cleaned:
-                added += await self.astore.add_messages(platform, group_id, cleaned)
+                report.added += await self.astore.add_messages(platform, group_id, cleaned)
 
             if topup_only:
                 break
@@ -453,6 +481,7 @@ class PersonaPrismStar(Star):
                 newest_seen = str(_history_cursor(messages[-1]) or "")
             if oldest is None or oldest == cursor:
                 await self.astore.set_scan_state(platform, group_id, exhausted=True)
+                report.exhausted = True
                 break
             cursor = oldest
             await self.astore.set_scan_state(
@@ -472,7 +501,7 @@ class PersonaPrismStar(Star):
             )
             if have >= target_total:
                 break
-        return added
+        return report
 
     async def _gather(
         self,
@@ -480,22 +509,29 @@ class PersonaPrismStar(Star):
         platform: str,
         group_id: str,
         user_id: str,
-    ) -> CorpusBundle:
-        """取语料并打包。命中本地缓存就不出网。"""
+    ) -> tuple[CorpusBundle, scanning.ScanReport]:
+        """取语料并打包，同时带回一份采集诊断。命中本地缓存就不出网。
+
+        诊断跟着返回值走、不挂在 self 上：画像可以并发执行
+        （limits.max_concurrency > 1），共享可变状态会串号。
+        """
         max_messages = max(20, self.config.int_of("collect.max_messages"))
         depth = max(max_messages * 4, 1000)
         rows = await self.astore.fetch_user_corpus(platform, group_id, user_id, limit=depth)
         from_cache = True
+        report = self._scan_plan(platform, group_id)
+        report.local_before = len(rows)
 
-        if group_id and platform == "aiocqhttp" and len(rows) < max_messages:
-            fetched = await self._backfill(
+        if report.supported and len(rows) < max_messages:
+            report = await self._backfill(
                 event,
                 platform,
                 group_id,
                 user_id,
                 target_total=max_messages,
+                report=report,
             )
-            if fetched:
+            if report.added:
                 from_cache = False
                 rows = await self.astore.fetch_user_corpus(
                     platform,
@@ -504,7 +540,7 @@ class PersonaPrismStar(Star):
                     limit=depth,
                 )
 
-        return collector.build_bundle(
+        bundle = collector.build_bundle(
             rows,
             max_messages=max_messages,
             min_chars=self.config.int_of("collect.min_chars"),
@@ -516,6 +552,7 @@ class PersonaPrismStar(Star):
             scanned=len(rows),
             from_cache=from_cache,
         )
+        return bundle, report
 
     # ---------------------------------------------------------------- 核心链路
 
@@ -597,18 +634,43 @@ class PersonaPrismStar(Star):
         backend = ""
         error = ""
         try:
-            if not self.config.bool_of("behavior.quiet_progress"):
-                yield event.plain_result(f"正在翻聊天记录，为 {target_hint or target_id} 生成{spec.label}…")
+            quiet = self.config.bool_of("behavior.quiet_progress")
+            who = target_hint or target_id
+            if not quiet:
+                yield event.plain_result(
+                    scanning.intro_line(
+                        self._scan_plan(platform, group_id),
+                        target_name=who,
+                        label=spec.label,
+                    ),
+                )
 
-            bundle = await self._gather(event, platform, group_id, target_id)
+            bundle, scan = await self._gather(event, platform, group_id, target_id)
+            logger.debug("[人格棱镜] 采集诊断 %s", scan.to_dict())
             min_messages = self.config.int_of("collect.min_messages")
             if not bundle.enough or bundle.stats.sampled < min_messages:
                 error = "样本不足"
+                #: 只说"发言太少"会让人以为回溯没跑。这里把诊断一并给出。
                 yield event.plain_result(
-                    f"有效发言只有 {bundle.stats.sampled} 条（至少需要 {min_messages} 条），"
-                    "多聊几句再来试试。",
+                    scanning.shortfall_reply(
+                        scan,
+                        target_name=who,
+                        label=spec.label,
+                        sampled=bundle.stats.sampled,
+                        min_messages=min_messages,
+                    ),
                 )
                 return
+
+            if not quiet:
+                note = scanning.progress_line(
+                    scan,
+                    target_name=who,
+                    label=spec.label,
+                    sampled=bundle.stats.sampled,
+                )
+                if note:
+                    yield event.plain_result(note)
 
             self._sender_cooldown[sender_key] = time.time()
             self._target_cooldown[target_key] = time.time()
@@ -1265,8 +1327,8 @@ class PersonaPrismStar(Star):
             f"  发言条数：{stats.get('total', 0)}",
             f"  参与人数：{stats.get('users', 0)}",
             f"  时间范围：{span or '暂无'}",
-            f"  历史回溯：{'已挖到头' if state.get('exhausted') else '仍可继续回溯'}",
         ]
+        lines.extend(scanning.describe_scan_state(state))
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
