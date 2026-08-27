@@ -1,0 +1,983 @@
+"""卡片渲染。
+
+设计取舍说明：
+
+* HTML 在 Python 里一次性拼成**完整文档**（不留 Jinja2 占位符），这样同一份
+  HTML 既能丢给 AstrBot 官方 t2i 端点渲染，也能交给本地 Playwright 渲染，
+  两条链路的产出完全一致，不会出现"网络版好看、本地版错版"的情况。
+* AstrBot 的 LocalRenderStrategy.render_custom_template 是直接
+  raise NotImplementedError 的，所以"本地渲染 HTML"必须自己实现，这里用
+  Playwright（装了就能用，没装就自动跳过这一层）。
+* 渲染分四层兜底，任何一层挂了都还有下一层，最差也会回落成纯文本。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import html
+import math
+import re
+import shutil
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from .models import Portrait
+
+#: 卡片主题。label 会显示在 WebUI 和 "棱镜主题" 命令里。
+THEMES: dict[str, dict[str, str]] = {
+    "aurora": {"label": "极光玻璃", "desc": "深空渐变 + 毛玻璃分层，默认主题"},
+    "ink": {"label": "水墨宣纸", "desc": "宣纸底色 + 朱印，中式排版"},
+    "neon": {"label": "赛博霓虹", "desc": "暗夜霓虹描边 + 扫描线"},
+    "paper": {"label": "杂志排版", "desc": "浅色刊物风，衬线大标题"},
+    "dossier": {"label": "机密档案", "desc": "牛皮纸档案袋 + 打字机字体"},
+}
+
+DEFAULT_THEME = "aurora"
+
+_JINJA_TOKEN_RE = re.compile(r"\{(?=[{%#])")
+
+_POLARITY_CLASS = {
+    "positive": "pos",
+    "negative": "neg",
+    "neutral": "neu",
+}
+
+
+def theme_label(name: str) -> str:
+    meta = THEMES.get(name)
+    return meta["label"] if meta else name
+
+
+def normalize_theme(name: str) -> str:
+    return name if name in THEMES else DEFAULT_THEME
+
+
+def _esc(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def neutralize_jinja(markup: str) -> str:
+    """把 HTML 里可能被 Jinja2 误读的 {{ / {% / {# 打断。
+
+    官方 t2i 端点会先用 Jinja2 渲染我们发过去的 HTML。卡片里出现群友原话，
+    万一有人发了 "{{ 7*7 }}" 这种东西，不处理就会被远端当模板执行。
+    """
+    return _JINJA_TOKEN_RE.sub("{<!-- -->", markup)
+
+
+# ---------------------------------------------------------------------------
+# 上下文
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class CardContext:
+    """渲染一张卡片需要的全部非画像信息。"""
+
+    title: str = "人格画像"
+    kind_label: str = "人格画像"
+    target_name: str = ""
+    target_id: str = ""
+    group_name: str = ""
+    avatar_url: str = ""
+    theme: str = DEFAULT_THEME
+    footer_note: str = "人格棱镜 · Persona Prism"
+    model: str = ""
+    sample_size: int = 0
+    total_corpus: int = 0
+    span_days: float = 0.0
+    show_evidence: bool = True
+    show_avatar: bool = True
+    created_at: int = field(default_factory=lambda: int(time.time()))
+
+
+@dataclass(slots=True)
+class RenderResult:
+    """渲染产物。image_path 为空表示只能发纯文本。"""
+
+    backend: str
+    image_path: str = ""
+    card_file: str = ""
+    text: str = ""
+
+
+# ---------------------------------------------------------------------------
+# 雷达图
+# ---------------------------------------------------------------------------
+
+
+def radar_geometry(
+    scores: list[int],
+    *,
+    cx: float = 130.0,
+    cy: float = 130.0,
+    radius: float = 96.0,
+) -> dict[str, Any]:
+    """算出雷达图需要的所有坐标。
+
+    刻意放在 Python 里算：远端 t2i 只跑 Jinja2 + 截图，不保证 JS 环境可靠，
+    卡片里一行脚本都不写才是最稳的。
+    """
+    count = len(scores)
+    if count < 3:
+        return {"polygon": "", "axes": [], "rings": [], "labels": []}
+    step = 2 * math.pi / count
+    polygon: list[str] = []
+    axes: list[dict[str, float]] = []
+    labels: list[dict[str, float]] = []
+    for index, score in enumerate(scores):
+        angle = -math.pi / 2 + index * step
+        ratio = max(0.06, min(1.0, score / 100.0))
+        px = cx + radius * ratio * math.cos(angle)
+        py = cy + radius * ratio * math.sin(angle)
+        polygon.append(f"{px:.1f},{py:.1f}")
+        axes.append(
+            {
+                "x": cx + radius * math.cos(angle),
+                "y": cy + radius * math.sin(angle),
+            },
+        )
+        labels.append(
+            {
+                "x": cx + (radius + 18) * math.cos(angle),
+                "y": cy + (radius + 18) * math.sin(angle),
+            },
+        )
+    rings = []
+    for level in (0.25, 0.5, 0.75, 1.0):
+        points = []
+        for index in range(count):
+            angle = -math.pi / 2 + index * step
+            points.append(
+                f"{cx + radius * level * math.cos(angle):.1f},{cy + radius * level * math.sin(angle):.1f}",
+            )
+        rings.append(" ".join(points))
+    return {
+        "polygon": " ".join(polygon),
+        "axes": axes,
+        "rings": rings,
+        "labels": labels,
+    }
+
+
+def _radar_svg(portrait: Portrait) -> str:
+    dims = portrait.dimensions[:8]
+    if len(dims) < 3:
+        return ""
+    geo = radar_geometry([d.score for d in dims])
+    parts: list[str] = ['<svg class="radar" viewBox="0 0 260 260" width="260" height="260">']
+    for ring in geo["rings"]:
+        parts.append(f'<polygon class="ring" points="{ring}"/>')
+    for axis in geo["axes"]:
+        parts.append(
+            f'<line class="axis" x1="130" y1="130" x2="{axis["x"]:.1f}" y2="{axis["y"]:.1f}"/>',
+        )
+    parts.append(f'<polygon class="shape" points="{geo["polygon"]}"/>')
+    for point in geo["polygon"].split(" "):
+        if not point:
+            continue
+        x, _, y = point.partition(",")
+        parts.append(f'<circle class="dot" cx="{x}" cy="{y}" r="3"/>')
+    for dim, label in zip(dims, geo["labels"], strict=False):
+        anchor = "middle"
+        if label["x"] > 145:
+            anchor = "start"
+        elif label["x"] < 115:
+            anchor = "end"
+        parts.append(
+            f'<text class="radar-label" x="{label["x"]:.1f}" y="{label["y"]:.1f}"'
+            f' text-anchor="{anchor}">{_esc(dim.name)}</text>',
+        )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# 样式
+# ---------------------------------------------------------------------------
+
+_BASE_CSS = """
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: var(--page-bg); }
+body {
+  font-family: var(--font-body);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { padding: 44px; width: 968px; }
+.card {
+  position: relative;
+  width: 880px;
+  border-radius: var(--radius);
+  background: var(--card-bg);
+  border: var(--card-border);
+  box-shadow: var(--card-shadow);
+  overflow: hidden;
+}
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--card-veil);
+  pointer-events: none;
+}
+.inner { position: relative; padding: 38px 42px 30px; }
+
+.hero { display: flex; align-items: center; gap: 24px; }
+.avatar-box {
+  width: 104px; height: 104px; flex: 0 0 104px;
+  border-radius: var(--avatar-radius);
+  overflow: hidden;
+  background: var(--avatar-bg);
+  border: var(--avatar-border);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 42px; font-weight: 700; color: var(--accent-ink);
+}
+.avatar-box img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.who { flex: 1; min-width: 0; }
+.kicker {
+  font-family: var(--font-title);
+  font-size: 13px; letter-spacing: .28em; text-transform: uppercase;
+  color: var(--accent);
+}
+.who h1 {
+  font-family: var(--font-title);
+  font-size: 34px; line-height: 1.2; margin-top: 6px;
+  color: var(--ink-strong);
+  word-break: break-all;
+}
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.chip {
+  font-size: 12px; padding: 4px 11px; border-radius: 999px;
+  background: var(--chip-bg); color: var(--ink-dim);
+  border: var(--chip-border);
+}
+
+.headline {
+  margin-top: 26px; padding: 20px 24px;
+  border-radius: 18px;
+  background: var(--quote-bg);
+  border-left: 4px solid var(--accent);
+  font-family: var(--font-title);
+  font-size: 22px; line-height: 1.55; color: var(--ink-strong);
+}
+
+.tags { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+.tag {
+  font-size: 15px; font-weight: 600;
+  padding: 7px 16px; border-radius: 12px;
+  border: 1px solid transparent;
+}
+.tag.pos { background: var(--tag-pos-bg); color: var(--tag-pos-ink); border-color: var(--tag-pos-line); }
+.tag.neu { background: var(--tag-neu-bg); color: var(--tag-neu-ink); border-color: var(--tag-neu-line); }
+.tag.neg { background: var(--tag-neg-bg); color: var(--tag-neg-ink); border-color: var(--tag-neg-line); }
+
+.panel { margin-top: 30px; }
+.panel-title {
+  font-family: var(--font-title);
+  font-size: 15px; letter-spacing: .16em;
+  color: var(--accent);
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 16px;
+}
+.panel-title::after {
+  content: ""; flex: 1; height: 1px; background: var(--rule);
+}
+
+.metrics { display: flex; gap: 26px; align-items: center; }
+.radar-box { flex: 0 0 260px; }
+.radar .ring { fill: none; stroke: var(--rule); stroke-width: 1; }
+.radar .axis { stroke: var(--rule); stroke-width: 1; }
+.radar .shape {
+  fill: var(--radar-fill); stroke: var(--accent); stroke-width: 2;
+}
+.radar .dot { fill: var(--accent); }
+.radar-label { font-size: 12px; fill: var(--ink-dim); font-family: var(--font-body); }
+
+.dims { flex: 1; display: flex; flex-direction: column; gap: 13px; }
+.dim-head { display: flex; justify-content: space-between; align-items: baseline; }
+.dim-name { font-size: 15px; font-weight: 600; color: var(--ink-strong); }
+.dim-score { font-family: var(--font-title); font-size: 15px; color: var(--accent); }
+.bar { height: 7px; border-radius: 999px; background: var(--bar-bg); margin-top: 6px; overflow: hidden; }
+.bar span { display: block; height: 100%; border-radius: 999px; background: var(--bar-fill); }
+.dim-note { font-size: 12px; color: var(--ink-mute); margin-top: 5px; line-height: 1.5; }
+
+.secs { display: flex; flex-direction: column; gap: 18px; }
+.sec {
+  padding: 18px 20px; border-radius: 16px;
+  background: var(--block-bg); border: var(--block-border);
+}
+.sec h3 { font-family: var(--font-title); font-size: 17px; color: var(--ink-strong); margin-bottom: 8px; }
+.sec p { font-size: 14.5px; line-height: 1.78; color: var(--ink); white-space: pre-wrap; }
+
+.quotes { display: flex; flex-direction: column; gap: 12px; }
+.quote {
+  padding: 14px 18px; border-radius: 14px;
+  background: var(--quote-bg); border-left: 3px solid var(--accent-soft);
+}
+.quote .q { font-size: 15px; color: var(--ink-strong); line-height: 1.6; }
+.quote .r { font-size: 12.5px; color: var(--ink-mute); margin-top: 6px; }
+
+.advice { display: flex; flex-direction: column; gap: 9px; }
+.advice li { list-style: none; font-size: 14.5px; line-height: 1.7; padding-left: 22px; position: relative; }
+.advice li::before {
+  content: "";
+  position: absolute; left: 4px; top: 9px;
+  width: 8px; height: 8px; border-radius: 3px;
+  background: var(--accent); transform: rotate(45deg);
+}
+
+.raw { font-size: 15px; line-height: 1.85; white-space: pre-wrap; color: var(--ink); }
+
+.foot {
+  margin-top: 32px; padding-top: 18px;
+  border-top: 1px dashed var(--rule);
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+}
+.conf { flex: 1; }
+.conf-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--ink-mute); margin-bottom: 6px; }
+.conf-bar { height: 6px; border-radius: 999px; background: var(--bar-bg); overflow: hidden; }
+.conf-bar span { display: block; height: 100%; background: var(--bar-fill); }
+.sign { text-align: right; font-size: 11.5px; color: var(--ink-mute); line-height: 1.6; }
+.sign strong { display: block; font-family: var(--font-title); font-size: 13px; color: var(--accent); letter-spacing: .1em; }
+.badge {
+  position: absolute; top: 26px; right: 30px;
+  font-family: var(--font-title); font-size: 11px; letter-spacing: .2em;
+  padding: 5px 12px; border-radius: 999px;
+  background: var(--badge-bg); color: var(--badge-ink); border: var(--badge-border);
+}
+"""
+
+_THEME_CSS: dict[str, str] = {
+    "aurora": """
+:root {
+  --page-bg: radial-gradient(1200px 700px at 12% -10%, #2a3d7a 0%, #131a33 45%, #0a0d1a 100%);
+  --radius: 30px;
+  --card-bg: linear-gradient(150deg, rgba(48,62,116,.72) 0%, rgba(20,26,50,.86) 62%, rgba(15,19,38,.92) 100%);
+  --card-border: 1px solid rgba(150,180,255,.22);
+  --card-shadow: 0 40px 90px rgba(4,7,20,.62);
+  --card-veil: radial-gradient(620px 320px at 82% 4%, rgba(120,220,255,.16), transparent 70%),
+               radial-gradient(520px 300px at 6% 96%, rgba(180,120,255,.14), transparent 72%);
+  --ink: #d3dcf5;
+  --ink-strong: #f2f6ff;
+  --ink-dim: #a9b6d9;
+  --ink-mute: #8592b8;
+  --accent: #7fe3ff;
+  --accent-soft: rgba(127,227,255,.55);
+  --accent-ink: #9fe9ff;
+  --rule: rgba(150,180,255,.22);
+  --chip-bg: rgba(120,150,220,.16);
+  --chip-border: 1px solid rgba(150,180,255,.2);
+  --quote-bg: rgba(120,160,240,.13);
+  --block-bg: rgba(18,24,48,.55);
+  --block-border: 1px solid rgba(150,180,255,.15);
+  --bar-bg: rgba(140,160,210,.2);
+  --bar-fill: linear-gradient(90deg, #7fe3ff, #b58bff);
+  --radar-fill: rgba(127,227,255,.2);
+  --avatar-radius: 50%;
+  --avatar-bg: rgba(120,150,220,.2);
+  --avatar-border: 2px solid rgba(160,220,255,.5);
+  --badge-bg: rgba(127,227,255,.14);
+  --badge-ink: #9fe9ff;
+  --badge-border: 1px solid rgba(127,227,255,.35);
+  --tag-pos-bg: rgba(90,230,180,.16); --tag-pos-ink: #86f0c4; --tag-pos-line: rgba(90,230,180,.35);
+  --tag-neu-bg: rgba(140,170,235,.16); --tag-neu-ink: #b7c8f5; --tag-neu-line: rgba(140,170,235,.34);
+  --tag-neg-bg: rgba(255,130,160,.15); --tag-neg-ink: #ff9fb6; --tag-neg-line: rgba(255,130,160,.34);
+  --font-title: "Noto Serif SC", "Songti SC", "Source Han Serif SC", serif;
+  --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+""",
+    "ink": """
+:root {
+  --page-bg: #ebe4d6;
+  --radius: 6px;
+  --card-bg: #f7f2e6;
+  --card-border: 1px solid #ddd0b4;
+  --card-shadow: 0 26px 60px rgba(90,70,40,.24);
+  --card-veil: radial-gradient(700px 420px at 88% 8%, rgba(120,110,90,.09), transparent 68%),
+               radial-gradient(520px 380px at 4% 92%, rgba(120,110,90,.07), transparent 70%);
+  --ink: #4a4237;
+  --ink-strong: #2b2620;
+  --ink-dim: #6d6355;
+  --ink-mute: #8b8071;
+  --accent: #9c3b32;
+  --accent-soft: rgba(156,59,50,.4);
+  --accent-ink: #9c3b32;
+  --rule: rgba(120,105,80,.28);
+  --chip-bg: rgba(120,105,80,.1);
+  --chip-border: 1px solid rgba(120,105,80,.2);
+  --quote-bg: rgba(200,180,140,.2);
+  --block-bg: rgba(255,252,244,.7);
+  --block-border: 1px solid rgba(120,105,80,.18);
+  --bar-bg: rgba(120,105,80,.16);
+  --bar-fill: linear-gradient(90deg, #9c3b32, #c07a45);
+  --radar-fill: rgba(156,59,50,.16);
+  --avatar-radius: 8px;
+  --avatar-bg: rgba(120,105,80,.14);
+  --avatar-border: 1px solid rgba(120,105,80,.35);
+  --badge-bg: #9c3b32;
+  --badge-ink: #f7f2e6;
+  --badge-border: 1px solid #7d2d26;
+  --tag-pos-bg: rgba(90,130,90,.16); --tag-pos-ink: #3f6b45; --tag-pos-line: rgba(90,130,90,.35);
+  --tag-neu-bg: rgba(120,105,80,.14); --tag-neu-ink: #6d6355; --tag-neu-line: rgba(120,105,80,.3);
+  --tag-neg-bg: rgba(156,59,50,.13); --tag-neg-ink: #9c3b32; --tag-neg-line: rgba(156,59,50,.3);
+  --font-title: "Noto Serif SC", "Songti SC", "STSong", serif;
+  --font-body: "Noto Serif SC", "Songti SC", "STSong", serif;
+}
+.card { background-image: repeating-linear-gradient(0deg, rgba(150,130,100,.05) 0 1px, transparent 1px 4px); }
+.badge { border-radius: 4px; }
+""",
+    "neon": """
+:root {
+  --page-bg: #05060d;
+  --radius: 18px;
+  --card-bg: linear-gradient(160deg, #0c1024 0%, #0a0b18 55%, #100a1e 100%);
+  --card-border: 1px solid rgba(0,255,214,.3);
+  --card-shadow: 0 0 0 1px rgba(255,0,140,.18), 0 30px 80px rgba(0,0,0,.8);
+  --card-veil: repeating-linear-gradient(0deg, rgba(255,255,255,.028) 0 1px, transparent 1px 3px),
+               radial-gradient(600px 300px at 92% 0%, rgba(255,0,140,.18), transparent 70%);
+  --ink: #b9c6d8;
+  --ink-strong: #eafcff;
+  --ink-dim: #7f93ad;
+  --ink-mute: #66788f;
+  --accent: #00ffd6;
+  --accent-soft: rgba(0,255,214,.5);
+  --accent-ink: #00ffd6;
+  --rule: rgba(0,255,214,.22);
+  --chip-bg: rgba(0,255,214,.08);
+  --chip-border: 1px solid rgba(0,255,214,.25);
+  --quote-bg: rgba(0,255,214,.07);
+  --block-bg: rgba(255,255,255,.03);
+  --block-border: 1px solid rgba(0,255,214,.16);
+  --bar-bg: rgba(255,255,255,.08);
+  --bar-fill: linear-gradient(90deg, #00ffd6, #ff2e9a);
+  --radar-fill: rgba(0,255,214,.16);
+  --avatar-radius: 14px;
+  --avatar-bg: rgba(0,255,214,.1);
+  --avatar-border: 1px solid rgba(0,255,214,.5);
+  --badge-bg: rgba(255,46,154,.14);
+  --badge-ink: #ff7ec0;
+  --badge-border: 1px solid rgba(255,46,154,.45);
+  --tag-pos-bg: rgba(0,255,214,.12); --tag-pos-ink: #6ffff0; --tag-pos-line: rgba(0,255,214,.4);
+  --tag-neu-bg: rgba(120,160,255,.12); --tag-neu-ink: #9fc0ff; --tag-neu-line: rgba(120,160,255,.35);
+  --tag-neg-bg: rgba(255,46,154,.14); --tag-neg-ink: #ff8bc4; --tag-neg-line: rgba(255,46,154,.4);
+  --font-title: "Rajdhani", "Noto Sans SC", "PingFang SC", sans-serif;
+  --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.who h1 { text-shadow: 0 0 18px rgba(0,255,214,.45); }
+.kicker { text-shadow: 0 0 12px rgba(0,255,214,.6); }
+""",
+    "paper": """
+:root {
+  --page-bg: #eceae4;
+  --radius: 4px;
+  --card-bg: #ffffff;
+  --card-border: 1px solid #e2ded4;
+  --card-shadow: 0 24px 60px rgba(40,35,25,.14);
+  --card-veil: none;
+  --ink: #3b3a36;
+  --ink-strong: #16150f;
+  --ink-dim: #6a6862;
+  --ink-mute: #8d8b84;
+  --accent: #b4451f;
+  --accent-soft: rgba(180,69,31,.4);
+  --accent-ink: #b4451f;
+  --rule: rgba(30,28,22,.16);
+  --chip-bg: #f3f1eb;
+  --chip-border: 1px solid #e2ded4;
+  --quote-bg: #f7f5f0;
+  --block-bg: #fbfaf7;
+  --block-border: 1px solid #eeebe4;
+  --bar-bg: #ecebe6;
+  --bar-fill: linear-gradient(90deg, #b4451f, #d99a52);
+  --radar-fill: rgba(180,69,31,.14);
+  --avatar-radius: 2px;
+  --avatar-bg: #f3f1eb;
+  --avatar-border: 1px solid #ddd8ce;
+  --badge-bg: #16150f;
+  --badge-ink: #f7f5f0;
+  --badge-border: 1px solid #16150f;
+  --tag-pos-bg: #eef5ee; --tag-pos-ink: #386b3f; --tag-pos-line: #d3e5d4;
+  --tag-neu-bg: #f1f2f5; --tag-neu-ink: #4d5566; --tag-neu-line: #dfe2e8;
+  --tag-neg-bg: #fbeeea; --tag-neg-ink: #a83f1c; --tag-neg-line: #f0d6cd;
+  --font-title: "Playfair Display", "Noto Serif SC", "Songti SC", serif;
+  --font-body: "Noto Sans SC", "Helvetica Neue", "PingFang SC", sans-serif;
+}
+.who h1 { font-size: 40px; letter-spacing: -.5px; }
+.headline { border-radius: 0; border-left-width: 3px; }
+.badge { border-radius: 2px; }
+""",
+    "dossier": """
+:root {
+  --page-bg: #3a3428;
+  --radius: 3px;
+  --card-bg: #ded2b4;
+  --card-border: 1px solid #b8a880;
+  --card-shadow: 0 28px 70px rgba(0,0,0,.5);
+  --card-veil: repeating-linear-gradient(135deg, rgba(120,100,60,.05) 0 6px, transparent 6px 12px);
+  --ink: #3d3524;
+  --ink-strong: #221d12;
+  --ink-dim: #5d5340;
+  --ink-mute: #7b6f57;
+  --accent: #8a2b1e;
+  --accent-soft: rgba(138,43,30,.45);
+  --accent-ink: #8a2b1e;
+  --rule: rgba(80,68,44,.35);
+  --chip-bg: rgba(90,76,48,.12);
+  --chip-border: 1px dashed rgba(80,68,44,.4);
+  --quote-bg: rgba(255,250,232,.5);
+  --block-bg: rgba(252,246,228,.62);
+  --block-border: 1px solid rgba(80,68,44,.22);
+  --bar-bg: rgba(80,68,44,.18);
+  --bar-fill: linear-gradient(90deg, #8a2b1e, #b3763a);
+  --radar-fill: rgba(138,43,30,.15);
+  --avatar-radius: 2px;
+  --avatar-bg: rgba(80,68,44,.16);
+  --avatar-border: 2px solid rgba(80,68,44,.5);
+  --badge-bg: transparent;
+  --badge-ink: #8a2b1e;
+  --badge-border: 2px solid #8a2b1e;
+  --tag-pos-bg: rgba(70,105,60,.14); --tag-pos-ink: #3f6135; --tag-pos-line: rgba(70,105,60,.35);
+  --tag-neu-bg: rgba(80,68,44,.12); --tag-neu-ink: #5d5340; --tag-neu-line: rgba(80,68,44,.3);
+  --tag-neg-bg: rgba(138,43,30,.12); --tag-neg-ink: #8a2b1e; --tag-neg-line: rgba(138,43,30,.32);
+  --font-title: "Courier New", "Noto Sans Mono CJK SC", monospace;
+  --font-body: "Courier New", "Noto Sans SC", monospace;
+}
+.kicker { letter-spacing: .34em; }
+.badge { transform: rotate(6deg); font-weight: 700; }
+.sec h3::before { content: "// "; color: var(--accent); }
+""",
+}
+
+
+# ---------------------------------------------------------------------------
+# HTML 组装
+# ---------------------------------------------------------------------------
+
+#: 主题 CSS 之后追加的补丁样式（头像回退、无雷达图布局等）。
+_EXTRA_CSS = """
+.avatar-box { position: relative; }
+.avatar-box .ini { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.avatar-box img { position: absolute; inset: 0; }
+.metrics.solo .dims { flex: 1 1 100%; }
+.note { margin-top: 20px; font-size: 12.5px; line-height: 1.65; color: var(--ink-mute); }
+.empty { font-size: 14px; color: var(--ink-mute); }
+"""
+
+_CONF_LEVELS = ((0.8, "高"), (0.6, "中"), (0.0, "低"))
+
+
+def confidence_label(value: float) -> str:
+    """把 0~1 的置信度翻成人话。"""
+    for floor, label in _CONF_LEVELS:
+        if value >= floor:
+            return label
+    return "低"
+
+
+def _initial(name: str, user_id: str) -> str:
+    for char in (name or "").strip():
+        if char.strip():
+            return _esc(char)
+    return _esc((user_id or "?")[:1])
+
+
+def _chip_texts(ctx: CardContext) -> list[str]:
+    chips: list[str] = []
+    if ctx.group_name:
+        chips.append(f"群 · {ctx.group_name}")
+    if ctx.target_id:
+        chips.append(f"ID · {ctx.target_id}")
+    if ctx.sample_size:
+        if ctx.total_corpus and ctx.total_corpus > ctx.sample_size:
+            chips.append(f"样本 · {ctx.sample_size}/{ctx.total_corpus} 条")
+        else:
+            chips.append(f"样本 · {ctx.sample_size} 条")
+    if ctx.span_days >= 0.05:
+        chips.append(f"跨度 · {ctx.span_days:.1f} 天")
+    chips.append(time.strftime("%Y-%m-%d %H:%M", time.localtime(ctx.created_at)))
+    return chips
+
+
+def _hero_html(ctx: CardContext) -> str:
+    parts: list[str] = ['<div class="hero">']
+    if ctx.show_avatar:
+        avatar = f'<span class="ini">{_initial(ctx.target_name, ctx.target_id)}</span>'
+        if ctx.avatar_url:
+            avatar += f'<img src="{_esc(ctx.avatar_url)}" alt="" onerror="this.style.display=\'none\'"/>'
+        parts.append(f'<div class="avatar-box">{avatar}</div>')
+    chips = "".join(f'<span class="chip">{_esc(text)}</span>' for text in _chip_texts(ctx))
+    parts.append(
+        '<div class="who">'
+        f'<div class="kicker">{_esc(ctx.kind_label)}</div>'
+        f"<h1>{_esc(ctx.target_name or ctx.target_id or '匿名群友')}</h1>"
+        f'<div class="chips">{chips}</div>'
+        "</div>",
+    )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _tags_html(portrait: Portrait) -> str:
+    if not portrait.tags:
+        return ""
+    items = "".join(
+        f'<span class="tag {_POLARITY_CLASS.get(tag.polarity, "neu")}">{_esc(tag.label)}</span>'
+        for tag in portrait.tags[:12]
+    )
+    return f'<div class="tags">{items}</div>'
+
+
+def _metrics_html(portrait: Portrait) -> str:
+    dims = portrait.dimensions[:8]
+    if not dims:
+        return ""
+    radar = _radar_svg(portrait)
+    rows: list[str] = []
+    for dim in dims:
+        score = max(0, min(100, int(dim.score)))
+        note = f'<div class="dim-note">{_esc(dim.note)}</div>' if dim.note else ""
+        rows.append(
+            '<div class="dim">'
+            '<div class="dim-head">'
+            f'<span class="dim-name">{_esc(dim.name)}</span>'
+            f'<span class="dim-score">{score}</span>'
+            "</div>"
+            f'<div class="bar"><span style="width:{score}%"></span></div>'
+            f"{note}"
+            "</div>",
+        )
+    radar_box = f'<div class="radar-box">{radar}</div>' if radar else ""
+    solo = "" if radar else " solo"
+    return (
+        '<div class="panel">'
+        '<div class="panel-title">维度评分</div>'
+        f'<div class="metrics{solo}">{radar_box}'
+        f'<div class="dims">{"".join(rows)}</div></div>'
+        "</div>"
+    )
+
+
+def _sections_html(portrait: Portrait) -> str:
+    if not portrait.sections:
+        return ""
+    blocks = "".join(
+        f'<div class="sec"><h3>{_esc(sec.title)}</h3><p>{_esc(sec.body)}</p></div>'
+        for sec in portrait.sections[:8]
+        if (sec.title or sec.body)
+    )
+    if not blocks:
+        return ""
+    return f'<div class="panel"><div class="panel-title">画像正文</div><div class="secs">{blocks}</div></div>'
+
+
+def _quotes_html(portrait: Portrait, ctx: CardContext) -> str:
+    if not ctx.show_evidence or not portrait.evidence:
+        return ""
+    items: list[str] = []
+    for item in portrait.evidence[:5]:
+        if not item.quote:
+            continue
+        reason = f'<div class="r">{_esc(item.reason)}</div>' if item.reason else ""
+        items.append(
+            f'<div class="quote"><div class="q">“{_esc(item.quote)}”</div>{reason}</div>',
+        )
+    if not items:
+        return ""
+    return (
+        '<div class="panel">'
+        '<div class="panel-title">原话证据</div>'
+        f'<div class="quotes">{"".join(items)}</div>'
+        "</div>"
+    )
+
+
+def _advice_html(portrait: Portrait) -> str:
+    items = [line for line in portrait.advice[:6] if line.strip()]
+    if not items:
+        return ""
+    body = "".join(f"<li>{_esc(line)}</li>" for line in items)
+    return f'<div class="panel"><div class="panel-title">相处建议</div><ul class="advice">{body}</ul></div>'
+
+
+def _foot_html(portrait: Portrait, ctx: CardContext) -> str:
+    conf = max(0.0, min(1.0, float(portrait.confidence or 0.0)))
+    percent = round(conf * 100)
+    sign_lines = [f"<strong>{_esc(ctx.footer_note)}</strong>"]
+    if ctx.model:
+        sign_lines.append(_esc(f"模型 {ctx.model}"))
+    sign_lines.append("内容由 AI 生成，仅供娱乐")
+    return (
+        '<div class="foot">'
+        '<div class="conf">'
+        '<div class="conf-head">'
+        f"<span>结论可信度 · {confidence_label(conf)}</span><span>{percent}%</span>"
+        "</div>"
+        f'<div class="conf-bar"><span style="width:{percent}%"></span></div>'
+        "</div>"
+        f'<div class="sign">{"<br/>".join(sign_lines)}</div>'
+        "</div>"
+    )
+
+
+def build_card_html(portrait: Portrait, ctx: CardContext) -> str:
+    """把画像渲染成一份自包含的完整 HTML 文档。
+
+    产物不含任何 Jinja2 占位符与 JavaScript，因此网络 t2i 与本地 Playwright
+    渲染出来的画面完全一致。
+    """
+    theme = normalize_theme(ctx.theme)
+    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS
+
+    if portrait.structured:
+        body_parts = [
+            f'<div class="headline">{_esc(portrait.headline)}</div>' if portrait.headline else "",
+            _tags_html(portrait),
+            _metrics_html(portrait),
+            _sections_html(portrait),
+            _quotes_html(portrait, ctx),
+            _advice_html(portrait),
+        ]
+        body = "".join(part for part in body_parts if part)
+        if not body:
+            body = '<div class="empty">这次没有解析到可展示的内容。</div>'
+    else:
+        text = portrait.raw_text or portrait.headline
+        body = f'<div class="panel"><div class="raw">{_esc(text)}</div></div>'
+
+    if ctx.sample_size and ctx.sample_size < 20:
+        body += '<div class="note">样本偏少，结论仅作参考；多聊几天后重新生成会更准。</div>'
+
+    markup = (
+        "<!DOCTYPE html>"
+        '<html lang="zh-CN"><head><meta charset="utf-8"/>'
+        f"<title>{_esc(ctx.title)}</title>"
+        f"<style>{css}</style></head><body>"
+        '<div class="wrap"><div class="card">'
+        f'<div class="badge">{_esc(theme_label(theme))}</div>'
+        '<div class="inner">'
+        f"{_hero_html(ctx)}{body}{_foot_html(portrait, ctx)}"
+        "</div></div></div></body></html>"
+    )
+    return neutralize_jinja(markup)
+
+
+# ---------------------------------------------------------------------------
+# 渲染器
+# ---------------------------------------------------------------------------
+
+_BACKEND_ORDER: dict[str, tuple[str, ...]] = {
+    "auto": ("t2i", "playwright", "pil", "text"),
+    "local_first": ("playwright", "t2i", "pil", "text"),
+    "t2i_only": ("t2i", "text"),
+    "text_only": ("text",),
+}
+
+BACKEND_LABELS: dict[str, str] = {
+    "t2i": "AstrBot t2i",
+    "playwright": "本地 Playwright",
+    "pil": "本地文转图",
+    "text": "纯文本",
+}
+
+
+class CardRenderer:
+    """四层兜底的卡片渲染器。
+
+    顺序由 render.backend 决定：
+
+    * auto        —— 官方 t2i → 本地 Playwright → 本地文转图 → 纯文本
+    * local_first —— 本地 Playwright → 官方 t2i → 本地文转图 → 纯文本
+    * t2i_only    —— 官方 t2i → 纯文本
+    * text_only   —— 纯文本
+
+    渲染成功的图片会复制一份到 cards 目录，WebUI 的记录详情直接读这份，
+    不依赖框架的临时文件生命周期。
+    """
+
+    def __init__(self, star: Any, config: Any, cards_dir: Any, logger: Any = None) -> None:
+        self._star = star
+        self._config = config
+        self._cards_dir = Path(cards_dir)
+        self._log = logger
+        #: Playwright 缺失时不必每张卡片都重试一遍。
+        self._playwright_unavailable = False
+
+    # -- 工具 ---------------------------------------------------------------
+    def _debug(self, message: str) -> None:
+        if self._log is not None:
+            self._log.debug(message)
+
+    def _warn(self, message: str) -> None:
+        if self._log is not None:
+            self._log.warning(message)
+
+    def _quality(self) -> int:
+        try:
+            return max(40, min(100, int(self._config.int_of("render.image_quality"))))
+        except Exception:
+            return 85
+
+    def _timeout(self) -> float:
+        try:
+            return float(max(20, min(300, int(self._config.int_of("llm.timeout_sec")))))
+        except Exception:
+            return 60.0
+
+    def backends(self) -> tuple[str, ...]:
+        try:
+            mode = self._config.str_of("render.backend")
+        except Exception:
+            mode = "auto"
+        return _BACKEND_ORDER.get(mode, _BACKEND_ORDER["auto"])
+
+    def _persist(self, source: str, record_key: str) -> str:
+        """把渲染结果落到 cards 目录，返回文件名。"""
+        src = Path(source)
+        if not src.is_file():
+            return ""
+        self._cards_dir.mkdir(parents=True, exist_ok=True)
+        suffix = src.suffix.lower() or ".jpg"
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
+            suffix = ".jpg"
+        stem = re.sub(r"[^0-9A-Za-z_-]", "_", str(record_key or "")) or f"card_{int(time.time() * 1000)}"
+        target = self._cards_dir / f"{stem}{suffix}"
+        try:
+            if src.resolve() != target.resolve():
+                shutil.copyfile(src, target)
+        except Exception as exc:
+            self._warn(f"[persona_prism] 卡片落盘失败：{exc}")
+            return ""
+        return target.name
+
+    # -- 各层实现 -----------------------------------------------------------
+    async def _render_network(self, markup: str) -> str:
+        """走 AstrBot 官方 t2i 端点。
+
+        return_url=False 会让框架把远端图片下载到本地并返回路径，正好是
+        我们要的（后续还要复制进 cards 目录）。
+        """
+        if self._star is None:
+            return ""
+        options = {"full_page": True, "type": "jpeg", "quality": self._quality()}
+        result = await asyncio.wait_for(
+            self._star.html_render(markup, {}, return_url=False, options=options),
+            timeout=self._timeout(),
+        )
+        return str(result or "")
+
+    async def _render_playwright(self, markup: str) -> str:
+        """本地 Chromium 截图。
+
+        AstrBot 的 LocalRenderStrategy.render_custom_template 是
+        NotImplementedError，所以这一层只能自己实现。
+        """
+        if self._playwright_unavailable:
+            return ""
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError:
+            self._playwright_unavailable = True
+            self._debug("[persona_prism] 未安装 playwright，跳过本地 HTML 渲染层")
+            return ""
+        self._cards_dir.mkdir(parents=True, exist_ok=True)
+        out = self._cards_dir / f"_tmp_{int(time.time() * 1000)}.jpg"
+        try:
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(args=["--no-sandbox"])
+                try:
+                    page = await browser.new_page(
+                        viewport={"width": 968, "height": 1400},
+                        device_scale_factor=2,
+                    )
+                    await page.set_content(markup, wait_until="load")
+                    with contextlib.suppress(Exception):
+                        await page.wait_for_load_state("networkidle", timeout=6000)
+                    await page.screenshot(
+                        path=str(out),
+                        full_page=True,
+                        type="jpeg",
+                        quality=self._quality(),
+                    )
+                finally:
+                    await browser.close()
+        except Exception:
+            out.unlink(missing_ok=True)
+            raise
+        return str(out)
+
+    async def _render_pil(self, text: str) -> str:
+        """最后一层图片兜底：框架自带的本地 Markdown 文转图（纯 PIL）。"""
+        from astrbot.api import html_renderer
+
+        result = await asyncio.wait_for(
+            html_renderer.render_t2i(text, use_network=False),
+            timeout=self._timeout(),
+        )
+        return str(result or "")
+
+    # -- 入口 ---------------------------------------------------------------
+    async def render(
+        self,
+        portrait: Portrait,
+        ctx: CardContext,
+        record_key: str = "",
+    ) -> RenderResult:
+        text = portrait.to_plain_text(ctx.title)
+        markup = build_card_html(portrait, ctx)
+        temps: list[Path] = []
+        try:
+            for backend in self.backends():
+                if backend == "text":
+                    break
+                try:
+                    if backend == "t2i":
+                        produced = await self._render_network(markup)
+                    elif backend == "playwright":
+                        produced = await self._render_playwright(markup)
+                    else:
+                        produced = await self._render_pil(text)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._warn(
+                        f"[persona_prism] {BACKEND_LABELS.get(backend, backend)} 渲染失败：{exc}",
+                    )
+                    continue
+                if not produced:
+                    continue
+                if backend == "playwright":
+                    temps.append(Path(produced))
+                card_file = self._persist(produced, record_key)
+                if not card_file:
+                    continue
+                return RenderResult(
+                    backend=backend,
+                    image_path=str(self._cards_dir / card_file),
+                    card_file=card_file,
+                    text=text,
+                )
+        finally:
+            for temp in temps:
+                with contextlib.suppress(Exception):
+                    temp.unlink(missing_ok=True)
+        return RenderResult(backend="text", text=text)
+
+
+__all__ = [
+    "BACKEND_LABELS",
+    "DEFAULT_THEME",
+    "THEMES",
+    "CardContext",
+    "CardRenderer",
+    "RenderResult",
+    "build_card_html",
+    "confidence_label",
+    "neutralize_jinja",
+    "normalize_theme",
+    "radar_geometry",
+    "theme_label",
+]

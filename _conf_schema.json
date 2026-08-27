@@ -1,0 +1,329 @@
+{
+  "llm": {
+    "description": "LLM 分析",
+    "type": "object",
+    "hint": "决定用哪个大模型来做画像分析。留空则跟随 AstrBot 当前会话正在使用的提供商。",
+    "items": {
+      "provider_id": {
+        "description": "指定提供商",
+        "type": "string",
+        "default": "",
+        "hint": "留空 = 跟随当前会话的提供商。",
+        "_special": "select_provider"
+      },
+      "model": {
+        "description": "覆盖模型名",
+        "type": "string",
+        "default": "",
+        "hint": "留空 = 用提供商自身的默认模型。画像分析建议用长上下文、指令跟随好的模型。"
+      },
+      "retry_times": {
+        "description": "失败重试次数",
+        "type": "int",
+        "default": 2,
+        "hint": "包含 JSON 解析失败导致的重试。"
+      },
+      "timeout_sec": {
+        "description": "单次请求超时（秒）",
+        "type": "int",
+        "default": 180
+      }
+    }
+  },
+  "collect": {
+    "description": "语料采集",
+    "type": "object",
+    "hint": "画像质量的上限由语料质量决定。这里控制怎么攒聊天记录。",
+    "items": {
+      "passive_capture": {
+        "description": "被动采集群聊消息",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后插件会静默把群内文本消息存进本地语料库（不含图片/语音内容）。这是唯一跨平台可用的采集方式，关闭后仅 QQ(aiocqhttp) 能靠主动回溯取数。"
+      },
+      "backfill_rounds": {
+        "description": "主动回溯翻页轮数",
+        "type": "int",
+        "default": 12,
+        "hint": "仅 QQ(aiocqhttp) 有效。每轮抓一页历史消息，页数越多越慢但语料越足。设 0 可完全关闭主动回溯。"
+      },
+      "page_size": {
+        "description": "每页拉取条数",
+        "type": "int",
+        "default": 200,
+        "hint": "OneBot get_group_msg_history 的 count 参数，通常上限 200。"
+      },
+      "max_messages": {
+        "description": "喂给模型的最多条数",
+        "type": "int",
+        "default": 400,
+        "hint": "超出时按『近期优先 + 全时段均匀覆盖』分层抽样，而不是粗暴截断。"
+      },
+      "min_messages": {
+        "description": "至少需要多少条才分析",
+        "type": "int",
+        "default": 20,
+        "hint": "低于此数会提示语料不足；仍可分析但卡片会标注置信度偏低。"
+      },
+      "min_chars": {
+        "description": "有效发言最短字数",
+        "type": "int",
+        "default": 2,
+        "hint": "过滤『嗯』『?』这类无信息量的碎片。"
+      },
+      "filter_commands": {
+        "description": "过滤指令类消息",
+        "type": "bool",
+        "default": true,
+        "hint": "丢掉以 / . # ! 等前缀开头的机器人指令，避免污染画像。"
+      },
+      "strip_urls": {
+        "description": "抹掉链接",
+        "type": "bool",
+        "default": true,
+        "hint": "把 URL 替换为 [链接]，既降噪也少泄露。"
+      },
+      "fold_repeats": {
+        "description": "折叠重复发言",
+        "type": "bool",
+        "default": true,
+        "hint": "同一句话刷多遍时折叠为『×N』，重复次数本身作为性格信号保留。"
+      },
+      "retention_days": {
+        "description": "语料保留天数",
+        "type": "int",
+        "default": 30,
+        "hint": "超期语料会在后台清理。0 = 永久保留（不建议）。"
+      },
+      "max_per_group": {
+        "description": "每群语料上限（条）",
+        "type": "int",
+        "default": 20000,
+        "hint": "超出时丢弃最旧的记录，防止数据库无限膨胀。"
+      },
+      "sampling": {
+        "description": "超预算抽样策略",
+        "type": "string",
+        "default": "layered",
+        "options": [
+          "layered",
+          "recent"
+        ],
+        "labels": {
+          "layered": "分层（近期优先 + 全时段覆盖）",
+          "recent": "只取最近"
+        }
+      }
+    }
+  },
+  "render": {
+    "description": "卡片渲染",
+    "type": "object",
+    "items": {
+      "backend": {
+        "description": "渲染后端",
+        "type": "string",
+        "default": "auto",
+        "options": [
+          "auto",
+          "local_first",
+          "t2i_only",
+          "text_only"
+        ],
+        "labels": {
+          "auto": "自动（网络 t2i → 本地 Playwright → Markdown 图 → 纯文本）",
+          "local_first": "本地优先（本地 Playwright → 网络 t2i → …）",
+          "t2i_only": "只用 AstrBot 网络 t2i",
+          "text_only": "只发纯文本"
+        },
+        "hint": "网络 t2i 会把渲染好的卡片 HTML 发送到 AstrBot 官方文本转图服务。若在意隐私请选『本地优先』或『只发纯文本』。"
+      },
+      "theme": {
+        "description": "默认卡片主题",
+        "type": "string",
+        "default": "aurora",
+        "options": [
+          "aurora",
+          "ink",
+          "neon",
+          "paper",
+          "dossier"
+        ],
+        "labels": {
+          "aurora": "极光 Aurora（暗色玻璃拟态）",
+          "ink": "水墨 Ink（宣纸留白）",
+          "neon": "霓境 Neon（赛博高对比）",
+          "paper": "刊物 Paper（杂志排版）",
+          "dossier": "档案 Dossier（机密档案风）"
+        },
+        "hint": "群内可用『棱镜主题 <名字>』临时切换本群主题。"
+      },
+      "image_quality": {
+        "description": "图片质量",
+        "type": "int",
+        "default": 85,
+        "slider": {
+          "min": 40,
+          "max": 100,
+          "step": 5
+        }
+      },
+      "show_evidence": {
+        "description": "卡片展示原话证据",
+        "type": "bool",
+        "default": true,
+        "hint": "展示模型据以判断的原话摘录。想更保守可以关掉。"
+      },
+      "show_avatar": {
+        "description": "卡片展示头像",
+        "type": "bool",
+        "default": true,
+        "hint": "使用 QQ 公开头像接口；非 QQ 平台自动降级为首字母字母块。"
+      },
+      "footer_note": {
+        "description": "卡片页脚署名",
+        "type": "string",
+        "default": "人格棱镜 · Persona Prism"
+      }
+    }
+  },
+  "limits": {
+    "description": "频率与并发",
+    "type": "object",
+    "items": {
+      "user_cooldown_sec": {
+        "description": "同一发起人冷却（秒）",
+        "type": "int",
+        "default": 60
+      },
+      "target_cooldown_sec": {
+        "description": "同一被画像对象冷却（秒）",
+        "type": "int",
+        "default": 30,
+        "hint": "防止群友被反复挂上刑。"
+      },
+      "group_daily_quota": {
+        "description": "每群每日次数上限",
+        "type": "int",
+        "default": 40,
+        "hint": "0 = 不限制。"
+      },
+      "max_concurrency": {
+        "description": "最大并发分析数",
+        "type": "int",
+        "default": 2
+      }
+    }
+  },
+  "privacy": {
+    "description": "隐私",
+    "type": "object",
+    "hint": "默认配置已经是保守的：不会把手机号、邮箱、地址交给模型。",
+    "items": {
+      "include_profile_fields": {
+        "description": "允许送入模型的资料字段",
+        "type": "list",
+        "default": [
+          "nickname",
+          "card",
+          "sex",
+          "long_nick",
+          "join_time",
+          "level"
+        ],
+        "hint": "可选：nickname / card / sex / age / long_nick / birthday / join_time / last_sent_time / level / title / area。手机号、邮箱、地址一律不可选。"
+      },
+      "protected_user_ids": {
+        "description": "保护名单（永不被画像）",
+        "type": "list",
+        "default": [],
+        "hint": "填写用户 ID。名单内成员既不会被画像，也不会被采集语料。"
+      },
+      "allow_opt_out": {
+        "description": "允许成员自助退出",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后群友可发『棱镜隐身』把自己加入本群黑名单并清空已存语料。"
+      },
+      "redact_pii": {
+        "description": "语料中脱敏手机号/邮箱/身份证",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "inject": {
+    "description": "画像注入对话",
+    "type": "object",
+    "hint": "把已生成的画像摘要作为背景信息注入 LLM 对话，让机器人『记得』群友是什么人。默认关闭。",
+    "items": {
+      "enabled": {
+        "description": "启用注入",
+        "type": "bool",
+        "default": false
+      },
+      "max_chars": {
+        "description": "注入摘要字数上限",
+        "type": "int",
+        "default": 300
+      },
+      "max_age_days": {
+        "description": "画像新鲜度上限（天）",
+        "type": "int",
+        "default": 14,
+        "hint": "过期的画像不再注入，避免用陈旧印象污染对话。"
+      }
+    }
+  },
+  "persona_clone": {
+    "description": "人格克隆",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用『棱镜克隆』指令",
+        "type": "bool",
+        "default": true
+      },
+      "sync_bot_nickname": {
+        "description": "克隆时同步修改机器人昵称",
+        "type": "bool",
+        "default": false,
+        "hint": "⚠️ 这会改动机器人账号的全局资料，影响所有群。默认关闭。"
+      },
+      "sync_bot_avatar": {
+        "description": "克隆时同步修改机器人头像",
+        "type": "bool",
+        "default": false,
+        "hint": "⚠️ 同上，全局生效且不可自动撤销。默认关闭。"
+      }
+    }
+  },
+  "behavior": {
+    "description": "交互行为",
+    "type": "object",
+    "items": {
+      "quiet_progress": {
+        "description": "安静模式（不发『正在分析』提示）",
+        "type": "bool",
+        "default": false
+      },
+      "history_limit": {
+        "description": "每个用户保留的画像历史条数",
+        "type": "int",
+        "default": 20
+      },
+      "allow_self_only": {
+        "description": "只允许给自己画像",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后非管理员无法画像别人，适合氛围敏感的群。"
+      },
+      "enabled_groups": {
+        "description": "生效群白名单",
+        "type": "list",
+        "default": [],
+        "hint": "留空 = 所有群生效。填了则只在名单内的群响应。"
+      }
+    }
+  }
+}

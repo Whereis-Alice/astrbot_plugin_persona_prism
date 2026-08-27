@@ -1,0 +1,32 @@
+# 插件自带的 lint 规则，保证本地与 CI 结果一致。
+target-version = "py310"
+line-length = 110
+extend-exclude = [".tmp", "data", "__pycache__"]
+
+[lint]
+select = [
+    "E",    # pycodestyle
+    "W",
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "C4",   # comprehensions
+    "ASYNC",
+    "RUF",
+]
+ignore = [
+    "E501",   # 行宽交给 formatter，注释里的中文长句不强求
+    "RUF001", # 中文文案里必然出现全角标点
+    "RUF002",
+    "RUF003",
+    "B008",
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["S101"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

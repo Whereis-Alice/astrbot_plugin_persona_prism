@@ -1,0 +1,6 @@
+# 仓库内统一用 LF，检出时交给各平台的 git 自行处理。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary

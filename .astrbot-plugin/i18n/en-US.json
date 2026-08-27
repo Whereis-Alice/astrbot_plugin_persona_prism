@@ -1,0 +1,12 @@
+{
+  "metadata": {
+    "display_name": "Persona Prism",
+    "desc": "Refracts group chat history into personality portraits: a local corpus, structured LLM analysis, five polished card themes, plus a WebUI for records and privacy controls."
+  },
+  "pages": {
+    "persona-prism": {
+      "title": "Persona Prism",
+      "description": "Browse portraits archived by group and member, tune runtime settings, privacy switches, and prompt templates."
+    }
+  }
+}
