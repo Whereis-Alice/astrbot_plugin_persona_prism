@@ -40,7 +40,7 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
     "collect.retention_days": {"label": "语料保留天数", "hint": "0 表示永久保留。"},
     "collect.sampling": {
         "label": "抽样策略",
-        "hint": "layered=近期加权 + 全期覆盖；recent=只取最近的消息。",
+        "hint": "仅在语料超过『单次分析上限』时才生效。layered=近期加权 + 全期覆盖；recent=只取最近的消息。",
     },
     "collect.filter_commands": {"label": "过滤指令消息", "hint": "丢掉以指令前缀开头的消息。"},
     "collect.strip_urls": {"label": "去除链接", "hint": "把 URL 从语料里摘掉，省 token。"},

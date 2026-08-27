@@ -2,6 +2,27 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.1.1
+
+配置面板的文案与下拉框修正。
+
+### 修复
+
+- **AstrBot 配置面板里下拉框显示英文裸值**：`labels` 之前写成了字典，而前端只接受与
+  `options` 同序的数组，字典会被静默忽略。于是「渲染后端」「卡片主题」「抽样策略」
+  「图片格式」四个下拉框显示的是 `auto` / `aurora` / `layered` / `jpeg` 而不是中文说明。
+- **11 个配置项缺少悬浮说明**：`llm.timeout_sec`、`collect.sampling`、`render.footer_note`、
+  `limits.user_cooldown_sec`、`limits.max_concurrency`、`privacy.redact_pii`、`inject.enabled`、
+  `inject.max_chars`、`persona_clone.enabled`、`behavior.quiet_progress`、`behavior.history_limit`
+  在面板上只有标题没有解释，现已全部补齐。
+- 「超预算抽样策略」改名为「语料超量时的抽样策略」，并写清楚它只在发言条数超过
+  `collect.max_messages` 时才生效、两种取样各自的取舍。WebUI 里的同名提示同步更新。
+
+### 变更
+
+- 新增 3 组 schema 体检测试：每个配置项都必须有 description 与 hint、`labels` 必须是与
+  `options` 同序的数组、面板默认值必须与代码默认值一致。测试 403 → 406。
+
 ## v1.1.0
 
 兼容上游「画像」系列玩法，卡片清晰度与字体可控，历史回溯适配更多协议端。

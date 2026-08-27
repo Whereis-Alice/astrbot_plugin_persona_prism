@@ -26,7 +26,8 @@
       "timeout_sec": {
         "description": "单次请求超时（秒）",
         "type": "int",
-        "default": 180
+        "default": 180,
+        "hint": "一次分析等待模型返回的上限。语料多或模型慢时可调大；超时后会按『失败重试次数』再试。卡片渲染的等待上限也取这个值（自动收敛到 20–300 秒）。"
       }
     }
   },
@@ -102,17 +103,18 @@
         "hint": "超出时丢弃最旧的记录，防止数据库无限膨胀。"
       },
       "sampling": {
-        "description": "超预算抽样策略",
+        "description": "语料超量时的抽样策略",
         "type": "string",
         "default": "layered",
         "options": [
           "layered",
           "recent"
         ],
-        "labels": {
-          "layered": "分层（近期优先 + 全时段覆盖）",
-          "recent": "只取最近"
-        }
+        "labels": [
+          "分层（近期优先 + 全时段覆盖）",
+          "只取最近"
+        ],
+        "hint": "语料条数超过上面的『喂给模型的最多条数』时，用哪种方式挑选真正发给模型的发言。layered：一半预算留给最近的发言，另一半在整个时间跨度上等距取样，兼顾近况与长期习惯（推荐）；recent：只取最近的发言，更贴近当下，但容易漏掉长期特征。"
       }
     }
   },
@@ -130,12 +132,12 @@
           "t2i_only",
           "text_only"
         ],
-        "labels": {
-          "auto": "自动（网络 t2i → 本地 Playwright → Markdown 图 → 纯文本）",
-          "local_first": "本地优先（本地 Playwright → 网络 t2i → …）",
-          "t2i_only": "只用 AstrBot 网络 t2i",
-          "text_only": "只发纯文本"
-        },
+        "labels": [
+          "自动（网络 t2i → 本地 Playwright → Markdown 图 → 纯文本）",
+          "本地优先（本地 Playwright → 网络 t2i → …）",
+          "只用 AstrBot 网络 t2i",
+          "只发纯文本"
+        ],
         "hint": "网络 t2i 会把渲染好的卡片 HTML 发送到 AstrBot 官方文本转图服务。若在意隐私请选『本地优先』或『只发纯文本』。"
       },
       "theme": {
@@ -149,13 +151,13 @@
           "paper",
           "dossier"
         ],
-        "labels": {
-          "aurora": "极光 Aurora（暗色玻璃拟态）",
-          "ink": "水墨 Ink（宣纸留白）",
-          "neon": "霓境 Neon（赛博高对比）",
-          "paper": "刊物 Paper（杂志排版）",
-          "dossier": "档案 Dossier（机密档案风）"
-        },
+        "labels": [
+          "极光 Aurora（暗色玻璃拟态）",
+          "水墨 Ink（宣纸留白）",
+          "霓境 Neon（赛博高对比）",
+          "刊物 Paper（杂志排版）",
+          "档案 Dossier（机密档案风）"
+        ],
         "hint": "群内可用『棱镜主题 <名字>』临时切换本群主题。"
       },
       "card_scale": {
@@ -177,10 +179,10 @@
           "jpeg",
           "png"
         ],
-        "labels": {
-          "jpeg": "JPEG（体积小，适合日常发群）",
-          "png": "PNG（无损，文字边缘最锐利）"
-        },
+        "labels": [
+          "JPEG（体积小，适合日常发群）",
+          "PNG（无损，文字边缘最锐利）"
+        ],
         "hint": "PNG 无损但体积明显更大；选 PNG 时下面的图片质量不生效。"
       },
       "image_quality": {
@@ -209,7 +211,8 @@
       "footer_note": {
         "description": "卡片页脚署名",
         "type": "string",
-        "default": "人格棱镜 · Persona Prism"
+        "default": "人格棱镜 · Persona Prism",
+        "hint": "卡片右下角的一行小字，可以改成自己的群名或机器人名。留空则该行留白。"
       },
       "font_family": {
         "description": "正文字体",
@@ -238,7 +241,8 @@
       "user_cooldown_sec": {
         "description": "同一发起人冷却（秒）",
         "type": "int",
-        "default": 60
+        "default": 60,
+        "hint": "同一个人连续发起分析的最短间隔，防刷图用。0 = 不限制；管理员不受冷却限制。"
       },
       "target_cooldown_sec": {
         "description": "同一被画像对象冷却（秒）",
@@ -255,7 +259,8 @@
       "max_concurrency": {
         "description": "最大并发分析数",
         "type": "int",
-        "default": 2
+        "default": 2,
+        "hint": "同时进行的分析任务数。超出的请求会排队等待而不是被拒绝；调大出图更快，但会同时占用更多模型额度与内存。"
       }
     }
   },
@@ -292,7 +297,8 @@
       "redact_pii": {
         "description": "语料中脱敏手机号/邮箱/身份证",
         "type": "bool",
-        "default": true
+        "default": true,
+        "hint": "手机号、邮箱、身份证号等在写入本地语料库之前就替换成占位符，数据库里不留明文。"
       }
     }
   },
@@ -304,12 +310,14 @@
       "enabled": {
         "description": "启用注入",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "开启后，群友和机器人对话时会把他最新的画像摘要附加进人格提示，让机器人『记得』这个人。默认关闭，开启前请确保群内知情。"
       },
       "max_chars": {
         "description": "注入摘要字数上限",
         "type": "int",
-        "default": 300
+        "default": 300,
+        "hint": "注入进人格提示的摘要字数上限，超出会截断。给太大会挤占对话上下文（有效范围 50–4000）。"
       },
       "max_age_days": {
         "description": "画像新鲜度上限（天）",
@@ -326,7 +334,8 @@
       "enabled": {
         "description": "启用人格克隆（『棱镜克隆』『克隆人格』『切换人格』）",
         "type": "bool",
-        "default": true
+        "default": true,
+        "hint": "关掉后『棱镜克隆』『克隆人格』『切换人格』『恢复人格』全部停用，只保留画像功能。"
       },
       "require_admin": {
         "description": "人格克隆仅限管理员",
@@ -361,12 +370,14 @@
       "quiet_progress": {
         "description": "安静模式（不发『正在分析』提示）",
         "type": "bool",
-        "default": false
+        "default": false,
+        "hint": "开启后不再发送『正在分析…』这类过程提示，只回最终结果。"
       },
       "history_limit": {
         "description": "每个用户保留的画像历史条数",
         "type": "int",
-        "default": 20
+        "default": 20,
+        "hint": "每个用户在本地保留的画像条数，超出时自动删除最旧的。『棱镜历史』和 WebUI 的记录页读的就是这份历史。"
       },
       "allow_self_only": {
         "description": "只允许给自己画像",

@@ -267,3 +267,53 @@ def test_dashboard_writable_keys_are_grouped_in_ui() -> None:
     for path in DASHBOARD_WRITABLE:
         group = path.split(".", 1)[0]
         assert group in dashboard.GROUP_TITLES, path
+
+
+# ---------------------------------------------------------------------------
+# _conf_schema.json 体检：AstrBot 面板上的文案与下拉框
+# ---------------------------------------------------------------------------
+
+
+def _schema_leaves() -> list[tuple[str, dict]]:
+    """把 schema 摊平成 [(路径, 配置项)]，只保留真正的叶子项。"""
+    schema = json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8"))
+    leaves: list[tuple[str, dict]] = []
+    for group, meta in schema.items():
+        for key, item in meta.get("items", {}).items():
+            leaves.append((f"{group}.{key}", item))
+    return leaves
+
+
+def test_every_schema_item_has_description_and_hint() -> None:
+    """漏了 hint，AstrBot 面板上就只剩一个没人看得懂的标题。"""
+    for path, item in _schema_leaves():
+        assert item.get("description"), f"{path} 缺 description"
+        assert item.get("hint"), f"{path} 缺 hint"
+
+
+def test_schema_labels_are_lists_aligned_with_options() -> None:
+    """AstrBot 前端只认与 options 同序的 labels 数组，写成字典会被静默忽略。
+
+    一旦被忽略，下拉框就直接显示 layered / aurora 这种裸值，用户根本不知道在选什么。
+    """
+    for path, item in _schema_leaves():
+        labels = item.get("labels")
+        if labels is None:
+            continue
+        options = item.get("options")
+        assert options, f"{path} 有 labels 却没有 options"
+        assert isinstance(labels, list), f"{path} 的 labels 必须是数组而不是字典"
+        assert len(labels) == len(options), f"{path} 的 labels 与 options 长度不一致"
+        assert all(isinstance(text, str) and text for text in labels), f"{path} 有空 label"
+
+
+def test_schema_defaults_match_code_defaults() -> None:
+    """面板默认值必须和代码默认值一致，否则点一次『恢复默认』就换了一套行为。"""
+    for path, item in _schema_leaves():
+        group, key = path.split(".", 1)
+        assert key in DEFAULTS[group], path
+        expected = DEFAULTS[group][key]
+        assert item.get("default") == expected, f"{path} 默认值不一致"
+        options = item.get("options")
+        if options:
+            assert expected in options, f"{path} 默认值不在 options 里"

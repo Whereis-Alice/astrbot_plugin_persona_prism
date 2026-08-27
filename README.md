@@ -389,7 +389,7 @@ WebUI 的记录详情直接读这一份，不依赖框架临时文件的生命�
 | `fold_repeats` | 开 | 连续重复发言折叠计数 |
 | `retention_days` | 30 | 语料保留天数（0 = 永久） |
 | `max_per_group` | 20000 | 单群语料上限（超出淘汰最旧） |
-| `sampling` | `layered` | `layered` 分层抽样 / `recent` 只取最近 |
+| `sampling` | `layered` | 发言条数超过 `max_messages` 时怎么取样：`layered` 一半近期 + 一半全期等距（推荐），`recent` 只取最近 |
 
 ### `render` 渲染
 

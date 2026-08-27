@@ -34,7 +34,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.1.0"
+PLUGIN_VERSION = "v1.1.1"
 
 #: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
 #: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
