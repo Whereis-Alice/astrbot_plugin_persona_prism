@@ -140,8 +140,18 @@ VALID_THEMES = ("aurora", "ink", "neon", "paper", "dossier")
 VALID_BACKENDS = ("auto", "local_first", "t2i_only", "text_only")
 VALID_SAMPLING = ("layered", "recent")
 VALID_IMAGE_FORMATS = ("jpeg", "png")
-#: 翻群历史时用哪个字段当游标。auto = 自动试探并记住每个群实测可用的那种。
-VALID_CURSOR_FIELDS = ("auto", "message_seq", "message_id")
+#: 翻群历史时用哪种翻页方式。名字含义 = 读哪个字段 + 取这一页的哪一端，
+#: 四种组合详见 prism.history；auto = 自动逐个试探并记住每个群实测可用的那种。
+#: 末尾两个是 v1.1.3 的旧名字，保留是为了不让升级前存下来的配置被校验拒掉。
+VALID_CURSOR_FIELDS = (
+    "auto",
+    "seq_first",
+    "id_first",
+    "seq_last",
+    "id_last",
+    "message_seq",
+    "message_id",
+)
 
 _ENUMS: dict[str, tuple[str, ...]] = {
     "render.theme": VALID_THEMES,

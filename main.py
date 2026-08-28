@@ -25,7 +25,7 @@ from astrbot.core.star import StarTools
 from astrbot.core.star.filter.event_message_type import EventMessageType
 from quart import jsonify, request
 
-from .prism import cards, collector, dashboard, scanning
+from .prism import cards, collector, dashboard, history, scanning
 from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
 from .prism.config import ConfigError, PrismConfig
@@ -34,7 +34,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.1.3"
+PLUGIN_VERSION = "v1.1.4"
 
 #: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
 #: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
@@ -69,6 +69,7 @@ OWN_COMMANDS = (
     "棱镜缓存",
     "棱镜清缓存",
     "棱镜重扫",
+    "棱镜诊断",
     "棱镜主题",
     "棱镜统计",
     "画像",
@@ -135,59 +136,14 @@ def _as_int(value: Any) -> int | None:
     return None
 
 
-#: 可以当翻页游标的字段，按"先试哪个"的顺序排列。
-CURSOR_FIELDS = ("message_seq", "message_id")
-
-
 def _history_cursor(raw: Any, field: str = "") -> int | None:
-    """从一条群历史消息里取出翻页游标。
-
-    get_group_msg_history 的 message_seq 参数在不同协议端上语义并不一致：
-
-    * 一部分实现（部分 NapCat / Lagrange 版本）认的是消息的 message_id；
-    * 另一部分实现认的是独立编号的 message_seq / real_seq。
-
-    传错了不会报错，而是**原地返回同一批最新消息**，看起来像"群历史翻到头了"。
-    所以这里不再写死优先级：field 指定就只取那一个字段，留空则退回旧的顺序探测，
-    由 _backfill 结合"这页有没有真的前进"来决定用哪种。
-    """
-    if not isinstance(raw, dict):
-        return None
-    keys: tuple[str, ...]
-    if field == "message_seq":
-        keys = ("message_seq", "real_seq")
-    elif field == "message_id":
-        keys = ("message_id",)
-    else:
-        keys = ("message_seq", "real_seq", "message_id")
-    for key in keys:
-        parsed = _as_int(raw.get(key))
-        if parsed is not None:
-            return parsed
-    return None
+    """从一条群历史消息里取出翻页游标（prism.history 的薄封装）。"""
+    return history.read_cursor(raw, field)
 
 
 def _page_ids(messages: Any) -> set[str]:
-    """一页群历史里所有消息的唯一标识，用来判断"翻页到底有没有前进"。
-
-    只比较游标数值是不够的：游标不生效时协议端返回的是同一批消息，但个别实现会把
-    message_seq 一起换成新值。直接看消息集合有没有出现新面孔最可靠。
-    """
-    ids: set[str] = set()
-    if not isinstance(messages, (list, tuple)):
-        return ids
-    for raw in messages:
-        if not isinstance(raw, dict):
-            continue
-        token = raw.get("message_id")
-        if token is None:
-            token = raw.get("message_seq")
-        if token is None:
-            token = raw.get("real_seq")
-        if token is not None:
-            ids.add(str(token))
-    return ids
-
+    """一页群历史里所有消息的唯一标识（prism.history 的薄封装）。"""
+    return history.page_ids(messages)
 
 def _strip_command(text: str, command: str) -> str:
     """去掉指令前缀（含唤醒前缀符）后剩下的参数部分。"""
@@ -440,16 +396,17 @@ class PersonaPrismStar(Star):
     ) -> scanning.ScanReport:
         """向更早的历史翻页，直到攒够目标条数或真的翻到头。
 
-        协议端的坑（v1.1.3 修的就是这个）：get_group_msg_history 的 message_seq
-        参数在不同 OneBot 实现里语义不同 —— 有的认 message_id，有的认独立编号的
-        message_seq。传错了**不会报错**，而是原地返回同一批最新消息。所以不能靠
-        "游标没变"来判断是否挖到头，必须看这一页有没有出现新的消息。
+        协议端的坑：get_group_msg_history 的翻页语义在各家 OneBot 实现里有两个自由度
+        —— message_seq 参数认的可能是 message_seq 也可能是 message_id，返回的那一页
+        数组可能是最旧在前也可能最新在前。传错了**不会报错**，而是原地返回同一批最新
+        消息。所以不能靠"游标没变"来判断是否挖到头，必须看这一页有没有出现新的消息。
 
         做法：
-        * 每页用 message_id 集合和上一页比对，出现新面孔才算真的前进；
-        * 原地打转时自动换另一种游标字段重试一次，成功后把选择写进 scan_state，
-          之后这个群就一直用实测可用的那种（collect.cursor_field 可以手动锁定）；
-        * 两种都翻不动就记 stalled 并在诊断里说清楚，**不写 exhausted** ——
+        * 每页用消息 ID 集合和上一页比对，出现新面孔才算真的前进；
+        * 原地打转时依次换 prism.history 里的其它翻页方式重试（四种组合全试一遍），
+          成功后把可用的那种写进 scan_state，之后这个群一直用它
+          （collect.cursor_field 可以手动锁定，「棱镜诊断」可以实测是哪一种）；
+        * 四种都翻不动就记 stalled 并在诊断里说清楚，**不写 exhausted** ——
           翻页卡住和历史挖完是两件事，混为一谈会让这个群永远只补拉最新一页。
 
         与上游的其他差异：断点持久化到 scan_state（重启后接着挖）、写库前剔除本插件
@@ -477,25 +434,36 @@ class PersonaPrismStar(Star):
         newest_seen = str(state.get("newest_seq") or "")
         depth = report.depth_before
 
-        #: 游标字段：配置写死就照办，auto 则沿用本群实测可用的那种，没有就从头试探。
-        wanted = (self.config.str_of("collect.cursor_field") or "auto").strip()
-        auto = wanted not in CURSOR_FIELDS
-        if auto:
-            field = str(state.get("cursor_field") or "")
-            if field not in CURSOR_FIELDS:
-                field = CURSOR_FIELDS[0]
-        else:
-            field = wanted
-        report.cursor_field = field
+        #: 翻页方式：配置写死就照办，auto 则沿用本群实测可用的那种，没有就从头试探。
+        locked = history.normalize_strategy(self.config.str_of("collect.cursor_field"))
+        auto = not locked
+        strategy = locked or history.normalize_strategy(state.get("cursor_field")) or history.STRATEGIES[0]
+        report.cursor_field = strategy
+        #: 试过且失败的方式，避免在一次回溯里来回打转。
+        tried: set[str] = set()
+
+        def _switch(page: Any) -> tuple[int, str] | None:
+            """当前方式翻不动时，换一种还没试过的方式、拿这一页重算游标。
+
+            返回 (新游标, 新方式)；四种全试过或都算不出游标就返回 None。
+            配置锁定了方式时不做任何切换 —— 用户说了算。
+            """
+            if not auto:
+                return None
+            tried.add(strategy)
+            for cand in history.rotate_strategies(strategy, tried):
+                value = history.cursor_of(page, cand)
+                if value is not None and value != cursor:
+                    return value, cand
+            return None
 
         if topup_only:
             rounds = min(rounds, 1)
         report.attempted = rounds > 0
 
         prev_ids: set[str] = set()
-        #: 上一页最旧的那条原始消息。换游标字段时要拿它重算一次游标。
-        anchor: Any = None
-        tried_switch = False
+        #: 上一页的原始消息列表。换翻页方式时要拿它重算一次游标。
+        last_page: Any = None
         index = 0
 
         while index < rounds:
@@ -522,23 +490,21 @@ class PersonaPrismStar(Star):
                 report.exhausted = True
                 break
 
-            page_ids = _page_ids(messages)
+            page_ids = history.page_ids(messages)
             if prev_ids and not (page_ids - prev_ids):
                 #: 整页都是上一页看过的消息 —— 游标没生效，协议端在原地打转。
-                other = next((name for name in CURSOR_FIELDS if name != field), "")
-                retry = _history_cursor(anchor, other) if (auto and other) else None
-                if not tried_switch and retry is not None and retry != cursor:
-                    tried_switch = True
+                #: 换一种翻页方式，拿上一页重算游标再试；四种全试过才认输。
+                switched = _switch(last_page)
+                if switched is not None:
                     logger.debug(
-                        "[人格棱镜] 群 %s 的 %s 游标翻不动，改用 %s 重试",
+                        "[人格棱镜] 群 %s 的 %s 翻不动，改用 %s 重试",
                         group_id,
-                        field,
-                        other,
+                        strategy,
+                        switched[1],
                     )
-                    field = other
-                    report.cursor_field = other
+                    cursor, strategy = switched
+                    report.cursor_field = strategy
                     report.cursor_switched = True
-                    cursor = retry
                     continue
                 report.stalled = True
                 break
@@ -562,23 +528,30 @@ class PersonaPrismStar(Star):
             if topup_only:
                 break
 
-            anchor = messages[0]
+            last_page = messages
             if not newest_seen:
-                newest_seen = str(_history_cursor(messages[-1], field) or "")
-            oldest = _history_cursor(anchor, field)
-            if oldest is None and auto and not tried_switch:
-                #: 这个协议端根本没返回当前字段（比如只有 message_id 没有 seq）。
-                other = next((name for name in CURSOR_FIELDS if name != field), "")
-                fallback = _history_cursor(anchor, other) if other else None
-                tried_switch = True
-                if fallback is not None:
-                    field = other
-                    report.cursor_field = other
-                    report.cursor_switched = True
-                    oldest = fallback
+                #: 只是个书签，记下"这个群我们见过的最新一条"，两端都试一下取大的。
+                marks = [
+                    value
+                    for value in (
+                        history.read_cursor(messages[0]),
+                        history.read_cursor(messages[-1]),
+                    )
+                    if value is not None
+                ]
+                if marks:
+                    newest_seen = str(max(marks))
+
+            oldest = history.cursor_of(messages, strategy)
             if oldest is None:
-                report.stalled = True
-                break
+                #: 当前方式取不到游标（比如协议端压根没返回这个字段），换一种。
+                switched = _switch(messages)
+                if switched is None:
+                    report.stalled = True
+                    break
+                oldest, strategy = switched
+                report.cursor_field = strategy
+                report.cursor_switched = True
             cursor = oldest
             depth += 1
             await self.astore.set_scan_state(
@@ -586,7 +559,7 @@ class PersonaPrismStar(Star):
                 group_id,
                 oldest_seq=str(cursor),
                 newest_seq=newest_seen,
-                cursor_field=field,
+                cursor_field=strategy,
                 depth_pages=depth,
             )
 
@@ -1309,6 +1282,7 @@ class PersonaPrismStar(Star):
             "  棱镜删除 —— 删除某人在本群的画像记录",
             "  棱镜清缓存 —— 清空本群语料",
             "  棱镜重扫 —— 重置历史回溯断点（不删语料），下次画像从头再挖一遍",
+            "  棱镜诊断 —— 实测协议端认哪种翻页方式，语料翻不动时先发这个",
             "  棱镜拉黑 / 棱镜放行 —— 维护保护名单",
             "",
             f"当前渲染链路：{self.config.str_of('render.backend')}"
@@ -1462,6 +1436,84 @@ class PersonaPrismStar(Star):
             "已重置本群的回溯断点，语料一条没删。下次画像会从最新一页重新往前翻，"
             "翻完可以发「棱镜缓存」看进度。",
         )
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("棱镜诊断")
+    async def cmd_probe(self, event: AstrMessageEvent):
+        """实测本群协议端认哪一种翻页方式，顺带看一眼语料清洗漏斗。
+
+        get_group_msg_history 传错游标时不报错、只是反复返回同一批最新消息，光看回溯
+        日志分不清\"翻到头了\"和\"翻页压根没生效\"。这条指令把四种翻页方式各打一次真实
+        请求（每次只拉 20 条、一律不写入语料库），把条数、与首页的重叠、最早时间有没有
+        真的前移都摊开来，能用的那种当场记进 scan_state 给之后的回溯复用。
+        """
+        platform, group_id = self._scope(event)
+        if not group_id:
+            yield event.plain_result("这条指令只在群里有效。")
+            return
+        if not scanning.supports_backfill(platform, group_id):
+            yield event.plain_result(
+                f"当前平台（{platform or '未知'}）没有可用的群历史接口，主动回溯本来就不会执行，"
+                "语料只能靠被动采集积累。",
+            )
+            return
+        client = getattr(event, "bot", None)
+        if client is None:
+            yield event.plain_result("拿不到协议端客户端，无法自检。")
+            return
+
+        probe_size = 20
+
+        async def fetch(cursor: int) -> Any:
+            payload = await client.api.call_action(
+                "get_group_msg_history",
+                group_id=int(group_id),
+                message_seq=cursor,
+                count=probe_size,
+                reverseOrder=True,
+            )
+            if isinstance(payload, dict):
+                return payload.get("messages")
+            return payload
+
+        report = await history.probe_pagination(fetch, brief=scanning.brief_error)
+
+        #: 清洗漏斗：同一批首页消息，分别按当前配置和最宽松口径过一遍，
+        #: 让\"群里很热闹但只提取到几条\"这类问题能区分是翻页问题还是清洗太严。
+        if report.ok:
+            try:
+                base = await fetch(0)
+            except Exception as exc:  #: 漏斗只是附加信息，失败不影响主结论
+                logger.debug("[人格棱镜] 清洗漏斗取样失败：%s", exc)
+            else:
+                rows = collector.parse_history_page(base)
+                report.parsed = len(rows)
+                report.kept = len(
+                    collector.clean_rows(
+                        rows,
+                        min_chars=self.config.int_of("collect.min_chars"),
+                        filter_commands=self.config.bool_of("collect.filter_commands"),
+                        drop_urls=self.config.bool_of("collect.strip_urls"),
+                        redact=self.config.bool_of("privacy.redact_pii"),
+                    ),
+                )
+                report.kept_loose = len(
+                    collector.clean_rows(
+                        rows,
+                        min_chars=1,
+                        filter_commands=False,
+                        drop_urls=False,
+                        redact=False,
+                    ),
+                )
+
+        if report.winner:
+            #: 之前很可能已经被错误游标顶到一个假断点，连带 exhausted 也可能是误判，
+            #: 所以确定可用方式的同时把断点清空，让下次画像从最新一页老老实实重挖。
+            await self.astore.reset_scan_state(platform, group_id)
+            await self.astore.set_scan_state(platform, group_id, cursor_field=report.winner)
+
+        yield event.plain_result("\n".join(history.render_probe(report, page_size=probe_size)))
 
     @filter.command("棱镜主题")
     async def cmd_theme(self, event: AstrMessageEvent):

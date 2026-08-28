@@ -55,20 +55,24 @@
         "hint": "OneBot get_group_msg_history 的 count 参数，通常上限 200。"
       },
       "cursor_field": {
-        "description": "历史翻页游标字段",
+        "description": "历史翻页方式",
         "type": "string",
         "default": "auto",
         "options": [
           "auto",
-          "message_seq",
-          "message_id"
+          "seq_first",
+          "id_first",
+          "seq_last",
+          "id_last"
         ],
         "labels": [
           "自动试探（推荐）",
-          "锁定 message_seq",
-          "锁定 message_id"
+          "message_seq · 取本页第一条",
+          "message_id · 取本页第一条",
+          "message_seq · 取本页最后一条",
+          "message_id · 取本页最后一条"
         ],
-        "hint": "OneBot 的 get_group_msg_history 用 message_seq 参数翻页，但各协议端对它的理解不一致：一部分认消息的 message_id，一部分认独立编号的 seq。传错了不会报错，而是反复返回同一批最新消息，看起来就像『群历史只有几十条』。auto：先试一种，发现翻不动就自动换另一种，并把这个群实测可用的那种记下来（推荐）。只有在你明确知道自家协议端认哪个、想省掉一次试探请求时才需要手动锁定。"
+        "hint": "OneBot 的 get_group_msg_history 用 message_seq 参数翻页，但各协议端对它的理解有两个自由度：① 它认的编号可能是消息的 message_id，也可能是独立编号的 message_seq / real_seq；② 返回的那一页数组可能是最旧在前，也可能最新在前，于是「本页最旧的那条」在开头还是末尾也不固定。两者组合成四种翻页方式，传错了不会报错，而是反复返回同一批最新消息，看起来就像『群历史只有几十条』。auto：逐个试这四种，把本群实测可用的那种记下来复用（推荐）。想直接知道自家协议端认哪一种，可以让管理员在群里发「棱镜诊断」实测一次。只有在你明确知道结果、想省掉试探请求时才需要手动锁定。"
       },
       "max_messages": {
         "description": "喂给模型的最多条数",

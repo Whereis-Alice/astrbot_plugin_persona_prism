@@ -334,7 +334,7 @@ def test_gather_in_private_chat_never_calls_the_protocol():
 
 
 # ---------------------------------------------------------------------------
-# 翻页游标自适应（v1.1.3）
+# 翻页方式自适应（v1.1.3 起，v1.1.4 扩成四种组合）
 # ---------------------------------------------------------------------------
 
 
@@ -395,13 +395,13 @@ def test_backfill_switches_cursor_field_when_seq_does_not_page():
     report = _run_backfill(star, event)
     #: 关键：不能因为"第二页看起来一样"就判定挖到头，而要换 message_id 继续挖。
     assert report.cursor_switched is True
-    assert report.cursor_field == "message_id"
+    assert report.cursor_field == "id_first"
     assert report.stalled is False
     assert report.pages == 3
     assert report.scanned == 60
     #: 实测可用的游标字段要落库，下次不用再试错。
     cursor_writes = [item for item in store.state_updates if item["cursor_field"]]
-    assert cursor_writes[-1]["cursor_field"] == "message_id"
+    assert cursor_writes[-1]["cursor_field"] == "id_first"
     assert cursor_writes[-1]["depth_pages"] == 3
 
 
@@ -415,8 +415,9 @@ def test_backfill_marks_stalled_instead_of_locking_exhausted():
     #: 翻页卡住 ≠ 历史挖完。写 exhausted 会让这个群以后永远只补拉最新一页。
     assert report.exhausted is False
     assert all(update["exhausted"] is False for update in store.state_updates)
-    #: 两种游标都试过就收手，不要拿满配额去空转。
-    assert len(api.calls) == 3
+    #: 四种翻页方式都试过就收手，不要拿满配额去空转。
+    #: 首页 1 次 + 四种各 1 次 = 5 次请求（最后一种失败后无路可换，直接认输）。
+    assert len(api.calls) == 5
 
 
 def test_backfill_respects_manually_locked_cursor_field():
@@ -436,21 +437,75 @@ def test_backfill_respects_manually_locked_cursor_field():
     event = SimpleNamespace(bot=SimpleNamespace(api=api))
     report = _run_backfill(star, event)
     #: 锁死了就一次都不该试探，第一页之后直接用 message_id。
-    assert report.cursor_field == "message_id"
+    #: v1.1.3 的旧值 message_id 要能继续用，归一成新名字 id_first。
+    assert report.cursor_field == "id_first"
     assert report.cursor_switched is False
     assert report.pages == 2
 
 
 def test_backfill_reuses_remembered_cursor_field():
+    #: 库里存的是 v1.1.3 写下的旧名字，升级后不能因此重新试错一轮。
     store = FakeStore(state={"cursor_field": "message_id"})
     star = _star(FakeConfig(**{"collect.backfill_rounds": 4, "collect.page_size": 20}), store)
     pages = [_dual_page(300, 20), _dual_page(200, 20)]
     api = IdOnlyApi(pages)
     event = SimpleNamespace(bot=SimpleNamespace(api=api))
     report = _run_backfill(star, event)
-    assert report.cursor_field == "message_id"
+    assert report.cursor_field == "id_first"
     assert report.cursor_switched is False
     assert report.pages == 2
+
+
+def test_backfill_reuses_new_style_remembered_strategy():
+    store = FakeStore(state={"cursor_field": "id_first"})
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 4, "collect.page_size": 20}), store)
+    api = IdOnlyApi([_dual_page(300, 20), _dual_page(200, 20)])
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    assert report.cursor_field == "id_first"
+    assert report.cursor_switched is False
+    assert report.pages == 2
+
+
+class ReversedIdApi:
+    """模拟"返回的一页是最新在前、翻页参数认 message_id"的协议端。
+
+    这正是 v1.1.3 漏掉的那一维自由度：就算字段猜对了也翻不动，因为"本页最旧的
+    那一条"在数组末尾而不是开头。上游和 v1.1.3 都只看 messages[0]。
+    """
+
+    def __init__(self, pages: list[list[dict[str, Any]]]) -> None:
+        self.pages = pages
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_action(self, action: str, **kwargs: Any) -> Any:
+        self.calls.append({"action": action, **kwargs})
+        cursor = int(kwargs.get("message_seq") or 0)
+        if cursor == 0:
+            return {"messages": self.pages[0]}
+        for index, page in enumerate(self.pages):
+            if int(page[-1]["message_id"]) == cursor:
+                nxt = index + 1
+                return {"messages": self.pages[nxt] if nxt < len(self.pages) else []}
+        return {"messages": self.pages[0]}
+
+
+def test_backfill_finds_strategy_that_needs_the_last_row():
+    """四种组合里最后那种也要能被试出来（用户现场的 6 条 vs 91 条）。"""
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
+    pages = [list(reversed(_dual_page(start, 20))) for start in (300, 200, 100)]
+    api = ReversedIdApi(pages)
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    assert report.cursor_switched is True
+    assert report.cursor_field == "id_last"
+    assert report.stalled is False
+    assert report.pages == 3
+    assert report.scanned == 60
+    cursor_writes = [item for item in store.state_updates if item["cursor_field"]]
+    assert cursor_writes[-1]["cursor_field"] == "id_last"
+    assert cursor_writes[-1]["depth_pages"] == 3
 
 
 def test_backfill_first_page_empty_does_not_lock_exhausted():

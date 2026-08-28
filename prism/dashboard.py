@@ -43,8 +43,8 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "hint": "仅在语料超过『单次分析上限』时才生效。layered=近期加权 + 全期覆盖；recent=只取最近的消息。",
     },
     "collect.cursor_field": {
-        "label": "历史翻页游标",
-        "hint": "各协议端对 get_group_msg_history 的翻页参数理解不一致，传错会反复返回同一批消息。auto 会自动试探并记住本群可用的那种。",
+        "label": "历史翻页方式",
+        "hint": "各协议端对 get_group_msg_history 的翻页参数理解不一致：它认的编号可能是 message_seq 也可能是 message_id，返回的那一页可能最旧在前也可能最新在前。传错不会报错，只会反复返回同一批消息。auto 会把四种组合逐个试并记住本群可用的那种；群里发「棱镜诊断」可以当场实测是哪一种。",
     },
     "collect.filter_commands": {"label": "过滤指令消息", "hint": "丢掉以指令前缀开头的消息。"},
     "collect.strip_urls": {"label": "去除链接", "hint": "把 URL 从语料里摘掉，省 token。"},
@@ -174,9 +174,31 @@ SAMPLING_CHOICES: list[dict[str, str]] = [
 ]
 
 CURSOR_FIELD_CHOICES: list[dict[str, str]] = [
-    {"value": "auto", "label": "自动试探", "hint": "翻不动就自动换另一种游标，并记住本群可用的那种（推荐）。"},
-    {"value": "message_seq", "label": "锁定 message_seq", "hint": "协议端认独立序号时用。"},
-    {"value": "message_id", "label": "锁定 message_id", "hint": "协议端把翻页参数当消息 ID 时用。"},
+    {
+        "value": "auto",
+        "label": "自动试探",
+        "hint": "翻不动就依次换其它方式，并记住本群实测可用的那种（推荐）。",
+    },
+    {
+        "value": "seq_first",
+        "label": "message_seq · 取本页第一条",
+        "hint": "协议端认独立序号、且返回的一页是最旧在前时用。",
+    },
+    {
+        "value": "id_first",
+        "label": "message_id · 取本页第一条",
+        "hint": "协议端把翻页参数当消息 ID、且返回的一页是最旧在前时用。",
+    },
+    {
+        "value": "seq_last",
+        "label": "message_seq · 取本页最后一条",
+        "hint": "协议端认独立序号、但返回的一页是最新在前时用。",
+    },
+    {
+        "value": "id_last",
+        "label": "message_id · 取本页最后一条",
+        "hint": "协议端把翻页参数当消息 ID、但返回的一页是最新在前时用。",
+    },
 ]
 
 

@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from . import history
+
 #: 协议端报错摘要的最大长度。异常里常见整段 traceback 或 JSON，直接贴群里会刷屏。
 ERROR_BRIEF_MAX = 80
 
@@ -243,11 +245,12 @@ def diagnose(report: ScanReport) -> list[str]:
             #: 于是每页都是同一批最新消息。必须说清楚，否则用户只会看到"发言太少"。
             items.append(
                 "协议端的翻页游标不生效：往前翻时反复返回同一批最新消息，"
-                "message_seq 和 message_id 两种游标都试过了。",
+                "四种翻页方式（message_seq / message_id × 取本页第一条 / 最后一条）都试过了。",
             )
             items.append(
-                "可以发「棱镜重扫」清掉本群断点重试；若仍旧如此，"
-                "多半是协议端的 get_group_msg_history 没有实现分页，"
+                "下一步请管理员在本群发「棱镜诊断」——它会把四种方式各实测一次，"
+                "报出每次拿到多少条、跟第一页重叠多少、最早时间有没有真的前移，"
+                "能用的那种会当场记下来；若四种都翻不动，就是协议端没实现分页，"
                 "只能靠被动采集慢慢攒语料。",
             )
         elif report.exhausted:
@@ -261,8 +264,8 @@ def diagnose(report: ScanReport) -> list[str]:
             )
         if report.cursor_switched and not report.stalled:
             items.append(
-                f"本群的翻页游标已自动切换成 {report.cursor_field}（原先那种翻不动），"
-                "这个选择已记下来，之后不会再试错。",
+                f"本群的翻页方式已自动切换成「{history.strategy_label(report.cursor_field)}」"
+                "（原先那种翻不动），这个选择已记下来，之后不会再试错。",
             )
     if not report.passive_capture:
         items.append("「被动采集」当前是关闭的，新消息不会入库，建议在配置里打开。")
@@ -294,6 +297,6 @@ def describe_scan_state(state: dict[str, Any], *, now: float | None = None) -> l
         lines.append("  上次回溯：还没有成功回溯过（发一次画像指令即会触发）")
     cursor = str(state.get("oldest_seq") or "")
     if cursor:
-        field = str(state.get("cursor_field") or "") or "message_seq"
-        lines.append(f"  回溯断点：{field}={cursor}")
+        field = history.strategy_label(state.get("cursor_field") or history.STRATEGIES[0])
+        lines.append(f"  回溯断点：{field} = {cursor}")
     return lines
