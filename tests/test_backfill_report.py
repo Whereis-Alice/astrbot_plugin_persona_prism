@@ -46,10 +46,19 @@ class FakeStore:
     """只记账、不落盘的假仓储。"""
 
     def __init__(self, *, state: dict[str, Any] | None = None, corpus: int = 0) -> None:
-        self.state = state or {"oldest_seq": "", "newest_seq": "", "exhausted": False}
+        base = {
+            "oldest_seq": "",
+            "newest_seq": "",
+            "exhausted": False,
+            "cursor_field": "",
+            "depth_pages": 0,
+        }
+        base.update(state or {})
+        self.state = base
         self.corpus = corpus
         self.writes: list[int] = []
         self.state_updates: list[dict[str, Any]] = []
+        self.resets: list[tuple[str, str]] = []
 
     async def get_scan_state(self, platform: str, group_id: str) -> dict[str, Any]:
         return dict(self.state)
@@ -62,10 +71,22 @@ class FakeStore:
         oldest_seq: str = "",
         newest_seq: str = "",
         exhausted: bool = False,
+        cursor_field: str = "",
+        depth_pages: int = -1,
     ) -> None:
         self.state_updates.append(
-            {"oldest_seq": oldest_seq, "newest_seq": newest_seq, "exhausted": exhausted},
+            {
+                "oldest_seq": oldest_seq,
+                "newest_seq": newest_seq,
+                "exhausted": exhausted,
+                "cursor_field": cursor_field,
+                "depth_pages": depth_pages,
+            },
         )
+
+    async def reset_scan_state(self, platform: str = "", group_id: str = "") -> int:
+        self.resets.append((platform, group_id))
+        return 1
 
     async def add_messages(self, platform: str, group_id: str, rows: list[Any]) -> int:
         self.writes.append(len(rows))
@@ -310,3 +331,143 @@ def test_gather_in_private_chat_never_calls_the_protocol():
     )
     assert report.supported is False
     assert event.bot.api.calls == []
+
+
+# ---------------------------------------------------------------------------
+# 翻页游标自适应（v1.1.3）
+# ---------------------------------------------------------------------------
+
+
+def _dual_page(start_seq: int, count: int, *, user_id: str = "42") -> list[dict[str, Any]]:
+    """造一页 message_id 和 message_seq 是两套编号的历史返回。
+
+    真实世界里这两个字段常常互不相干，而 get_group_msg_history 的翻页参数只认其中
+    一种。用同一个数值的假数据是测不出这个 bug 的。
+    """
+    page = _page(start_seq, count, user_id=user_id)
+    for row in page:
+        row["message_id"] = str(900_000 + int(row["message_seq"]))
+    return page
+
+
+class IdOnlyApi:
+    """模拟"翻页参数其实是 message_id"的协议端。
+
+    传 message_seq 的值它认不出来，于是**不报错**，直接原地返回最新一页 ——
+    这正是用户现场遇到的现象（我们只捞到 6 条，上游捞到 91 条）。
+    """
+
+    def __init__(self, pages: list[list[dict[str, Any]]]) -> None:
+        self.pages = pages
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_action(self, action: str, **kwargs: Any) -> Any:
+        self.calls.append({"action": action, **kwargs})
+        cursor = int(kwargs.get("message_seq") or 0)
+        if cursor == 0:
+            return {"messages": self.pages[0]}
+        for index, page in enumerate(self.pages):
+            if int(page[0]["message_id"]) == cursor:
+                nxt = index + 1
+                return {"messages": self.pages[nxt] if nxt < len(self.pages) else []}
+        #: 认不出来的游标 → 原地返回最新一页。
+        return {"messages": self.pages[0]}
+
+
+class FrozenApi:
+    """无论游标是什么都返回同一页：协议端压根没实现分页。"""
+
+    def __init__(self, page: list[dict[str, Any]]) -> None:
+        self.page = page
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_action(self, action: str, **kwargs: Any) -> Any:
+        self.calls.append({"action": action, **kwargs})
+        return {"messages": self.page}
+
+
+def test_backfill_switches_cursor_field_when_seq_does_not_page():
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
+    pages = [_dual_page(300, 20), _dual_page(200, 20), _dual_page(100, 20)]
+    api = IdOnlyApi(pages)
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    #: 关键：不能因为"第二页看起来一样"就判定挖到头，而要换 message_id 继续挖。
+    assert report.cursor_switched is True
+    assert report.cursor_field == "message_id"
+    assert report.stalled is False
+    assert report.pages == 3
+    assert report.scanned == 60
+    #: 实测可用的游标字段要落库，下次不用再试错。
+    cursor_writes = [item for item in store.state_updates if item["cursor_field"]]
+    assert cursor_writes[-1]["cursor_field"] == "message_id"
+    assert cursor_writes[-1]["depth_pages"] == 3
+
+
+def test_backfill_marks_stalled_instead_of_locking_exhausted():
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
+    api = FrozenApi(_dual_page(300, 20))
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    assert report.stalled is True
+    #: 翻页卡住 ≠ 历史挖完。写 exhausted 会让这个群以后永远只补拉最新一页。
+    assert report.exhausted is False
+    assert all(update["exhausted"] is False for update in store.state_updates)
+    #: 两种游标都试过就收手，不要拿满配额去空转。
+    assert len(api.calls) == 3
+
+
+def test_backfill_respects_manually_locked_cursor_field():
+    store = FakeStore()
+    star = _star(
+        FakeConfig(
+            **{
+                "collect.backfill_rounds": 4,
+                "collect.page_size": 20,
+                "collect.cursor_field": "message_id",
+            },
+        ),
+        store,
+    )
+    pages = [_dual_page(300, 20), _dual_page(200, 20)]
+    api = IdOnlyApi(pages)
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    #: 锁死了就一次都不该试探，第一页之后直接用 message_id。
+    assert report.cursor_field == "message_id"
+    assert report.cursor_switched is False
+    assert report.pages == 2
+
+
+def test_backfill_reuses_remembered_cursor_field():
+    store = FakeStore(state={"cursor_field": "message_id"})
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 4, "collect.page_size": 20}), store)
+    pages = [_dual_page(300, 20), _dual_page(200, 20)]
+    api = IdOnlyApi(pages)
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    assert report.cursor_field == "message_id"
+    assert report.cursor_switched is False
+    assert report.pages == 2
+
+
+def test_backfill_first_page_empty_does_not_lock_exhausted():
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 5}), store)
+    event = _event([[]])
+    report = _run_backfill(star, event)
+    assert report.exhausted is True
+    #: 刚进群 / 历史被清理都会返回空页，别把这种群永久标记成"挖到头"。
+    assert store.state_updates == []
+
+
+def test_backfill_reports_depth_before_from_state():
+    store = FakeStore(state={"oldest_seq": "300", "depth_pages": 7})
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 2, "collect.page_size": 20}), store)
+    event = _event([_page(200, 20), _page(100, 20)])
+    report = _run_backfill(star, event)
+    assert report.depth_before == 7
+    #: 断点深度要接着累加，而不是每次从 0 重新数。
+    assert store.state_updates[-1]["depth_pages"] == 9

@@ -29,6 +29,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "retention_days": 30,
         "max_per_group": 20000,
         "sampling": "layered",
+        "cursor_field": "auto",
     },
     "render": {
         "backend": "auto",
@@ -98,6 +99,7 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "collect.min_messages",
         "collect.retention_days",
         "collect.sampling",
+        "collect.cursor_field",
         "collect.filter_commands",
         "collect.strip_urls",
         "collect.fold_repeats",
@@ -138,12 +140,15 @@ VALID_THEMES = ("aurora", "ink", "neon", "paper", "dossier")
 VALID_BACKENDS = ("auto", "local_first", "t2i_only", "text_only")
 VALID_SAMPLING = ("layered", "recent")
 VALID_IMAGE_FORMATS = ("jpeg", "png")
+#: 翻群历史时用哪个字段当游标。auto = 自动试探并记住每个群实测可用的那种。
+VALID_CURSOR_FIELDS = ("auto", "message_seq", "message_id")
 
 _ENUMS: dict[str, tuple[str, ...]] = {
     "render.theme": VALID_THEMES,
     "render.backend": VALID_BACKENDS,
     "render.image_format": VALID_IMAGE_FORMATS,
     "collect.sampling": VALID_SAMPLING,
+    "collect.cursor_field": VALID_CURSOR_FIELDS,
 }
 
 _RANGES: dict[str, tuple[int, int]] = {

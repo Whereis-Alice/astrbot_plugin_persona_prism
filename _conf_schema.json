@@ -54,6 +54,22 @@
         "default": 200,
         "hint": "OneBot get_group_msg_history 的 count 参数，通常上限 200。"
       },
+      "cursor_field": {
+        "description": "历史翻页游标字段",
+        "type": "string",
+        "default": "auto",
+        "options": [
+          "auto",
+          "message_seq",
+          "message_id"
+        ],
+        "labels": [
+          "自动试探（推荐）",
+          "锁定 message_seq",
+          "锁定 message_id"
+        ],
+        "hint": "OneBot 的 get_group_msg_history 用 message_seq 参数翻页，但各协议端对它的理解不一致：一部分认消息的 message_id，一部分认独立编号的 seq。传错了不会报错，而是反复返回同一批最新消息，看起来就像『群历史只有几十条』。auto：先试一种，发现翻不动就自动换另一种，并把这个群实测可用的那种记下来（推荐）。只有在你明确知道自家协议端认哪个、想省掉一次试探请求时才需要手动锁定。"
+      },
       "max_messages": {
         "description": "喂给模型的最多条数",
         "type": "int",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import time
 from typing import Any
 
@@ -237,6 +238,8 @@ def test_scan_state_defaults(store: PrismStore) -> None:
         "newest_seq": "",
         "exhausted": False,
         "last_scan": 0,
+        "cursor_field": "",
+        "depth_pages": 0,
     }
 
 
@@ -258,6 +261,57 @@ def test_scan_state_exhausted_flag_can_be_cleared(store: PrismStore) -> None:
 def test_scan_state_records_timestamp(store: PrismStore) -> None:
     store.set_scan_state(PLATFORM, GROUP, oldest_seq="1")
     assert store.get_scan_state(PLATFORM, GROUP)["last_scan"] > 0
+
+
+def test_scan_state_remembers_cursor_field_and_depth(store: PrismStore) -> None:
+    store.set_scan_state(PLATFORM, GROUP, oldest_seq="1", cursor_field="message_id", depth_pages=3)
+    state = store.get_scan_state(PLATFORM, GROUP)
+    assert state["cursor_field"] == "message_id"
+    assert state["depth_pages"] == 3
+    # 空串 / 负数表示「保留旧值」，方便只更新游标而不动记忆。
+    store.set_scan_state(PLATFORM, GROUP, oldest_seq="0")
+    state = store.get_scan_state(PLATFORM, GROUP)
+    assert state["cursor_field"] == "message_id"
+    assert state["depth_pages"] == 3
+
+
+def test_reset_scan_state_scoped_and_global(store: PrismStore) -> None:
+    store.set_scan_state(PLATFORM, GROUP, oldest_seq="1", exhausted=True)
+    store.set_scan_state(PLATFORM, "800", oldest_seq="2", exhausted=True)
+    assert store.reset_scan_state(PLATFORM, GROUP) == 1
+    assert store.get_scan_state(PLATFORM, GROUP)["exhausted"] is False
+    assert store.get_scan_state(PLATFORM, "800")["exhausted"] is True
+    assert store.reset_scan_state() == 1
+    assert store.get_scan_state(PLATFORM, "800")["exhausted"] is False
+
+
+def test_legacy_db_without_cursor_field_unlocks_exhausted(tmp_path) -> None:
+    """v1.1.2 误锁的旧库在升级打开时应当自动解锁，否则永远只能补拉最新一页。"""
+    path = tmp_path / "legacy.db"
+    seeded = PrismStore(path)
+    try:
+        seeded.set_scan_state(PLATFORM, GROUP, oldest_seq="123", newest_seq="456", exhausted=True)
+    finally:
+        seeded.close()
+    # 把库还原成旧 schema：去掉 v1.1.3 新增的两列。
+    raw = sqlite3.connect(path)
+    try:
+        raw.execute("ALTER TABLE scan_state DROP COLUMN cursor_field")
+        raw.execute("ALTER TABLE scan_state DROP COLUMN depth_pages")
+        raw.commit()
+    finally:
+        raw.close()
+
+    upgraded = PrismStore(path)
+    try:
+        state = upgraded.get_scan_state(PLATFORM, GROUP)
+        assert state["exhausted"] is False
+        assert state["oldest_seq"] == ""
+        assert state["depth_pages"] == 0
+        # 最新一侧的游标要留着，避免被动采集的增量重复拉取。
+        assert state["newest_seq"] == "456"
+    finally:
+        upgraded.close()
 
 
 # -- 画像记录 ---------------------------------------------------------------

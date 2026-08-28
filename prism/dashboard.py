@@ -42,6 +42,10 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "抽样策略",
         "hint": "仅在语料超过『单次分析上限』时才生效。layered=近期加权 + 全期覆盖；recent=只取最近的消息。",
     },
+    "collect.cursor_field": {
+        "label": "历史翻页游标",
+        "hint": "各协议端对 get_group_msg_history 的翻页参数理解不一致，传错会反复返回同一批消息。auto 会自动试探并记住本群可用的那种。",
+    },
     "collect.filter_commands": {"label": "过滤指令消息", "hint": "丢掉以指令前缀开头的消息。"},
     "collect.strip_urls": {"label": "去除链接", "hint": "把 URL 从语料里摘掉，省 token。"},
     "collect.fold_repeats": {"label": "折叠重复刷屏", "hint": "同一句话重复多次时折叠成一条并标注次数。"},
@@ -167,6 +171,12 @@ BACKEND_CHOICES: list[dict[str, str]] = [
 SAMPLING_CHOICES: list[dict[str, str]] = [
     {"value": "layered", "label": "分层抽样", "hint": "一半预算留给最近的消息，其余等距覆盖整个时间跨度。"},
     {"value": "recent", "label": "只看最近", "hint": "简单截取最近的 N 条。"},
+]
+
+CURSOR_FIELD_CHOICES: list[dict[str, str]] = [
+    {"value": "auto", "label": "自动试探", "hint": "翻不动就自动换另一种游标，并记住本群可用的那种（推荐）。"},
+    {"value": "message_seq", "label": "锁定 message_seq", "hint": "协议端认独立序号时用。"},
+    {"value": "message_id", "label": "锁定 message_id", "hint": "协议端把翻页参数当消息 ID 时用。"},
 ]
 
 
@@ -322,6 +332,9 @@ def _field_meta(path: str) -> dict[str, Any]:
     elif path == "collect.sampling":
         meta["type"] = "choice"
         meta["choices"] = SAMPLING_CHOICES
+    elif path == "collect.cursor_field":
+        meta["type"] = "choice"
+        meta["choices"] = CURSOR_FIELD_CHOICES
     elif path == "render.theme":
         meta["type"] = "choice"
         meta["choices"] = [
@@ -440,6 +453,7 @@ def validate_prompt_payload(payload: Any, *, reserved: set[str]) -> dict[str, An
 
 __all__ = [
     "BACKEND_CHOICES",
+    "CURSOR_FIELD_CHOICES",
     "FIELD_HINTS",
     "GROUP_TITLES",
     "LAYOUT_CHOICES",

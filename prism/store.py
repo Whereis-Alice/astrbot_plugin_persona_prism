@@ -75,12 +75,16 @@ CREATE TABLE IF NOT EXISTS groups_meta (
 );
 
 CREATE TABLE IF NOT EXISTS scan_state (
-    platform    TEXT NOT NULL DEFAULT '',
-    group_id    TEXT NOT NULL DEFAULT '',
-    oldest_seq  TEXT NOT NULL DEFAULT '',
-    newest_seq  TEXT NOT NULL DEFAULT '',
-    exhausted   INTEGER NOT NULL DEFAULT 0,
-    last_scan   INTEGER NOT NULL DEFAULT 0,
+    platform     TEXT NOT NULL DEFAULT '',
+    group_id     TEXT NOT NULL DEFAULT '',
+    oldest_seq   TEXT NOT NULL DEFAULT '',
+    newest_seq   TEXT NOT NULL DEFAULT '',
+    exhausted    INTEGER NOT NULL DEFAULT 0,
+    last_scan    INTEGER NOT NULL DEFAULT 0,
+    -- 这个群实测可用的翻页游标字段（message_seq / message_id），空串表示还没试出来。
+    cursor_field TEXT NOT NULL DEFAULT '',
+    -- 累计成功往前翻过的页数，用来回答「到底挖了多深」。
+    depth_pages  INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (platform, group_id)
 );
 
@@ -150,16 +154,33 @@ class PrismStore:
     #: 首版之后追加的列。sqlite 的 ALTER TABLE 没有 IF NOT EXISTS，只能先探再加。
     _MIGRATIONS: ClassVar[dict[str, tuple[tuple[str, str], ...]]] = {
         "prompt_entries": (("layout", "TEXT NOT NULL DEFAULT ''"),),
+        "scan_state": (
+            ("cursor_field", "TEXT NOT NULL DEFAULT ''"),
+            ("depth_pages", "INTEGER NOT NULL DEFAULT 0"),
+        ),
     }
 
     def _migrate(self) -> None:
-        """给旧版本建好的库补上新增列。调用方需已持有 self._lock。"""
+        """给旧版本建好的库补上新增列，必要时做一次性数据自愈。
+
+        调用方需已持有 self._lock。
+        """
+        added: set[tuple[str, str]] = set()
         for table, columns in self._MIGRATIONS.items():
             rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
             existing = {str(row["name"]) for row in rows}
             for name, ddl in columns:
                 if name not in existing:
                     self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                    added.add((table, name))
+        if ("scan_state", "cursor_field") in added:
+            #: v1.1.2 及更早版本只用 message_seq 当游标。在部分协议端上这个值不被
+            #: get_group_msg_history 接受，第二页会原地返回同一批消息，被旧代码误判成
+            #: 「已挖到群历史尽头」并永久写进 exhausted，此后每次画像都只补拉最新一页。
+            #: 升级时把所有断点清零，让这些群重新从最新一页开始自适应地往前挖。
+            self._conn.execute(
+                "UPDATE scan_state SET exhausted = 0, oldest_seq = '', depth_pages = 0",
+            )
 
     # -- 基础设施 -----------------------------------------------------------
     def close(self) -> None:
@@ -423,13 +444,22 @@ class PrismStore:
             (platform, group_id),
         )
         if not rows:
-            return {"oldest_seq": "", "newest_seq": "", "exhausted": False, "last_scan": 0}
+            return {
+                "oldest_seq": "",
+                "newest_seq": "",
+                "exhausted": False,
+                "last_scan": 0,
+                "cursor_field": "",
+                "depth_pages": 0,
+            }
         row = rows[0]
         return {
             "oldest_seq": row["oldest_seq"] or "",
             "newest_seq": row["newest_seq"] or "",
             "exhausted": bool(row["exhausted"]),
             "last_scan": int(row["last_scan"] or 0),
+            "cursor_field": row["cursor_field"] or "",
+            "depth_pages": int(row["depth_pages"] or 0),
         }
 
     def set_scan_state(
@@ -440,14 +470,22 @@ class PrismStore:
         oldest_seq: str = "",
         newest_seq: str = "",
         exhausted: bool = False,
+        cursor_field: str = "",
+        depth_pages: int = -1,
     ) -> None:
+        """写回一个群的回溯断点。
+
+        空串 / 负数表示"保持原值"，这样调用方可以只更新自己关心的那几个字段。
+        exhausted 是唯一每次都覆盖的字段——它代表"本次判断"，不该被历史值粘住。
+        """
         self._write(
             [
                 (
                     """
                     INSERT INTO scan_state
-                        (platform, group_id, oldest_seq, newest_seq, exhausted, last_scan)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (platform, group_id, oldest_seq, newest_seq, exhausted,
+                         last_scan, cursor_field, depth_pages)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(platform, group_id) DO UPDATE SET
                         oldest_seq = CASE
                             WHEN excluded.oldest_seq != '' THEN excluded.oldest_seq
@@ -458,7 +496,15 @@ class PrismStore:
                             ELSE scan_state.newest_seq
                         END,
                         exhausted = excluded.exhausted,
-                        last_scan = excluded.last_scan
+                        last_scan = excluded.last_scan,
+                        cursor_field = CASE
+                            WHEN excluded.cursor_field != '' THEN excluded.cursor_field
+                            ELSE scan_state.cursor_field
+                        END,
+                        depth_pages = CASE
+                            WHEN excluded.depth_pages >= 0 THEN excluded.depth_pages
+                            ELSE scan_state.depth_pages
+                        END
                     """,
                     (
                         platform,
@@ -467,10 +513,24 @@ class PrismStore:
                         newest_seq,
                         1 if exhausted else 0,
                         _now(),
+                        cursor_field,
+                        depth_pages,
                     ),
                 ),
             ],
         )
+
+    def reset_scan_state(self, platform: str = "", group_id: str = "") -> int:
+        """清掉回溯断点，让下次画像从最新一页重新往前挖。
+
+        给「棱镜重扫」用：万一某个群的断点被协议端的怪异行为带歪了（或者用户换了
+        协议端 / 机器人重新入群），不需要删整个库就能重新开始。不传参数表示全部清空。
+        """
+        where, params = _scope_where(platform, group_id)
+        rows = self._query(f"SELECT COUNT(*) FROM scan_state{where}", params)
+        removed = int(rows[0][0] or 0) if rows else 0
+        self._write([(f"DELETE FROM scan_state{where}", params)])
+        return removed
 
     # ==================================================================
     # 画像记录

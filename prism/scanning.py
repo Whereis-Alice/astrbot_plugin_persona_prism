@@ -76,6 +76,14 @@ class ScanReport:
     passive_capture: bool = True
     #: 回溯前本地已有的该用户语料条数。
     local_before: int = 0
+    #: 本次实际用来翻页的字段名（message_seq / message_id），空串表示还没翻过页。
+    cursor_field: str = ""
+    #: 本次中途换过游标字段（先试的那种翻不动，自动切到另一种并成功了）。
+    cursor_switched: bool = False
+    #: 两种游标都试过，协议端依旧原地返回同一批消息 —— 翻页卡住了，不是真的挖到头。
+    stalled: bool = False
+    #: 本次之前这个群累计已往前翻过的页数（断点深度）。
+    depth_before: int = 0
     #: 协议端报错摘要，空串表示没报错。
     error: str = ""
 
@@ -105,6 +113,10 @@ class ScanReport:
             "topup_only": self.topup_only,
             "passive_capture": self.passive_capture,
             "local_before": self.local_before,
+            "cursor_field": self.cursor_field,
+            "cursor_switched": self.cursor_switched,
+            "stalled": self.stalled,
+            "depth_before": self.depth_before,
             "error": self.error,
         }
 
@@ -142,7 +154,12 @@ def progress_line(
         return ""
     scope = "补拉了最新一页群历史" if report.topup_only else f"已翻 {report.pages} 页群历史"
     detail = f"（约 {report.scanned} 条消息，新入库 {report.added} 条）"
-    tail = "，群历史已翻到头" if report.exhausted else ""
+    if report.stalled:
+        tail = "，但协议端的翻页没有继续前进"
+    elif report.exhausted:
+        tail = "，群历史已翻到头"
+    else:
+        tail = ""
     return (
         f"{scope}{detail}{tail}，"
         f"提取到 {who} 的有效发言 {sampled} 条，正在生成{label}…"
@@ -221,6 +238,18 @@ def diagnose(report: ScanReport) -> list[str]:
         )
         if report.pages == 0:
             items.append("协议端返回了空历史，通常说明机器人刚进群或该群消息已被清理。")
+        elif report.stalled:
+            #: 最难自查的一种失败：接口调通了、每页都有数据，但游标不生效，
+            #: 于是每页都是同一批最新消息。必须说清楚，否则用户只会看到"发言太少"。
+            items.append(
+                "协议端的翻页游标不生效：往前翻时反复返回同一批最新消息，"
+                "message_seq 和 message_id 两种游标都试过了。",
+            )
+            items.append(
+                "可以发「棱镜重扫」清掉本群断点重试；若仍旧如此，"
+                "多半是协议端的 get_group_msg_history 没有实现分页，"
+                "只能靠被动采集慢慢攒语料。",
+            )
         elif report.exhausted:
             items.append("群历史已经翻到最早一条，能拿到的记录就这些了。")
         elif report.topup_only:
@@ -229,6 +258,11 @@ def diagnose(report: ScanReport) -> list[str]:
             items.append(
                 f"计划 {report.planned_rounds} 轮，实际 {report.pages} 轮就停了"
                 "（已攒够或协议端不再返回数据）。",
+            )
+        if report.cursor_switched and not report.stalled:
+            items.append(
+                f"本群的翻页游标已自动切换成 {report.cursor_field}（原先那种翻不动），"
+                "这个选择已记下来，之后不会再试错。",
             )
     if not report.passive_capture:
         items.append("「被动采集」当前是关闭的，新消息不会入库，建议在配置里打开。")
@@ -242,7 +276,13 @@ def describe_scan_state(state: dict[str, Any], *, now: float | None = None) -> l
     """
     moment = time.time() if now is None else now
     exhausted = "已挖到头" if state.get("exhausted") else "仍可继续回溯"
-    lines = [f"  历史回溯：{exhausted}"]
+    depth = 0
+    try:
+        depth = max(0, int(state.get("depth_pages") or 0))
+    except (TypeError, ValueError):
+        depth = 0
+    suffix = f"（已往前翻过 {depth} 页）" if depth else ""
+    lines = [f"  历史回溯：{exhausted}{suffix}"]
     last = 0
     try:
         last = int(state.get("last_scan") or 0)
@@ -254,5 +294,6 @@ def describe_scan_state(state: dict[str, Any], *, now: float | None = None) -> l
         lines.append("  上次回溯：还没有成功回溯过（发一次画像指令即会触发）")
     cursor = str(state.get("oldest_seq") or "")
     if cursor:
-        lines.append(f"  回溯断点：message_seq={cursor}")
+        field = str(state.get("cursor_field") or "") or "message_seq"
+        lines.append(f"  回溯断点：{field}={cursor}")
     return lines

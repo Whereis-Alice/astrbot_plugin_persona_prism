@@ -27,8 +27,8 @@ def test_plugin_identity_is_renamed_everywhere():
 
 
 def test_own_commands_has_no_duplicates():
-    assert len(main.OWN_COMMANDS) == 25
-    assert len(set(main.OWN_COMMANDS)) == 25
+    assert len(main.OWN_COMMANDS) == 26
+    assert len(set(main.OWN_COMMANDS)) == 26
 
 
 def test_builtin_commands_are_a_subset_of_own_commands():
