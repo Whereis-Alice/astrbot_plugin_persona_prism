@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import html
 import math
 import re
@@ -49,12 +50,258 @@ _POLARITY_CLASS = {
 
 
 def theme_label(name: str) -> str:
-    meta = THEMES.get(name)
+    """主题名 → 中文名。认识 auto（自动挡），不认识的原样返回。"""
+    meta = THEME_CHOICES.get(name)
     return meta["label"] if meta else name
 
 
 def normalize_theme(name: str) -> str:
     return name if name in THEMES else DEFAULT_THEME
+
+
+AUTO_THEME = "auto"
+
+#: 「自动挡」不是第六套配色，而是「临场按这张画像的性子挑一套」。
+#: 它只出现在配置项和「棱镜主题」里，落库的 record.theme 永远是被挑中的那套真主题，
+#: 这样 WebUI 重看旧卡、重新渲染的时候不会变脸。
+AUTO_THEME_META: dict[str, str] = {
+    "label": "自动挡",
+    "desc": "看画像的性子临场挑一套，同一个群连着画也不容易撞",
+}
+
+#: 可配置 / 可切换的全部档位 = 自动挡 + 五套真主题。THEMES 仍然只装真主题。
+THEME_CHOICES: dict[str, dict[str, str]] = {AUTO_THEME: AUTO_THEME_META, **THEMES}
+
+#: 自动挡的选题词表。刻意写成「意象词」而不是人格量表术语：
+#: 画像里出现的是形容词和网络口语，不是 OCEAN 五因素的标准表述。
+THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "neon": (
+        "夜猫", "熬夜", "深夜", "凌晨", "作息颠倒",
+        "玩梗", "抽象", "整活", "阴阳", "嘴炮", "话痨", "跳脱", "亢奋", "躁",
+        "中二", "二次元", "游戏", "网瘾", "电子", "赛博", "弹幕", "刷屏", "锐利", "毒舌",
+    ),
+    "ink": (
+        "沉稳", "内敛", "克制", "安静", "淡然", "平和", "温润", "慢热", "含蓄",
+        "文艺", "古风", "诗", "书", "茶", "禅", "佛系", "留白", "分寸", "儒雅", "沉默",
+    ),
+    "paper": (
+        "理性", "逻辑", "条理", "严谨", "客观", "专业", "技术", "科普", "干货",
+        "分析", "总结", "效率", "认真", "务实", "钻研", "求证", "结构化", "输出", "科研", "工程",
+    ),
+    "dossier": (
+        "神秘", "高冷", "潜水", "观察", "谜", "难以捉摸", "距离感", "深藏", "反差",
+        "腹黑", "谨慎", "戒备", "低调", "隐身", "旁观", "沉底", "疏离", "捉摸不定", "试探", "边界感",
+    ),
+    "aurora": (
+        "温暖", "热情", "元气", "活泼", "可爱", "亲和", "治愈", "共情", "体贴", "捧场",
+        "情绪", "细腻", "浪漫", "分享", "社交", "氛围", "热心", "撒娇", "情感", "柔软",
+    ),
+}
+
+#: 维度名命中左边的词时，按分数高低给主题加权：分高偏 high、分低偏 low。
+#: 这是启发式而不是心理学结论——够用就行，真正决定性的还是标签和文字。
+_DIMENSION_AXES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("活跃", "话", "表达", "发言", "输出", "外向", "参与"), "neon", "ink"),
+    (("理性", "逻辑", "条理", "严谨", "专业", "知识", "信息"), "paper", "neon"),
+    (("情绪", "感性", "共情", "亲和", "温", "善", "热"), "aurora", "dossier"),
+    (("攻击", "锋", "毒", "刺", "冲", "梗", "玩"), "neon", "paper"),
+    (("稳", "耐心", "沉", "自控", "克制"), "ink", "neon"),
+    (("神秘", "距离", "隐", "潜", "谜", "反差", "深"), "dossier", "aurora"),
+)
+
+#: 内容证据的相对权重。这一组只决定「五套主题谁的气质更贴」，
+#: 绝对大小无所谓 —— 算完会归一化，最贴的那套拿满分 _W_CONTENT。
+_W_STRONG_HIT = 2.0   # 标题 / 标签 / 维度名 / 小节标题里命中一个词
+_W_WEAK_HIT = 1.0     # 正文 / 原话理由 / 建议里命中一个词
+_W_DIM_HIGH = 1.5     # 某个维度打了高分
+_W_DIM_LOW = 1.2      # 某个维度打了低分
+_W_POLARITY = 1.2     # 标签整体偏负 / 偏正
+_W_CONFIDENCE = 0.8   # 置信度过低（资料少 → 「档案未完成」的气质）
+_DIM_HIGH_AT = 68
+_DIM_LOW_AT = 32
+
+#: 归一化之后的三档权重，决定「内容 / 运气 / 避重复」谁说话更响：
+#: 气质明显的画像（比如满屏熬夜玩梗）拿满 3.0，第二名通常不到 1.0，
+#: 所以内容说得清时它稳赢；两三套主题打得难分时，抖动和避重复才决定结果。
+_W_CONTENT = 3.0
+_W_JITTER = 1.3
+#: 本群最近用过的主题依次降权。故意调到「能翻盘势均力敌的局，翻不了一边倒的局」。
+_AVOID_PENALTY = (2.0, 0.9)
+#: 内容分领先第二名超过这个差距，就算「气质明摆着」，避重复不再对它降权——
+#: 宁可连着撞一次主题，也不要把一个满屏熬夜玩梗的人渲染成水墨留白。
+_AVOID_SKIP_MARGIN = 1.2
+
+
+def is_auto_theme(name: str) -> bool:
+    return str(name or "").strip().lower() == AUTO_THEME
+
+
+def normalize_theme_choice(name: str) -> str:
+    """校验「配置层」的主题值：允许 auto，其它未知值回落默认主题。"""
+    value = str(name or "").strip().lower()
+    return value if value in THEME_CHOICES else DEFAULT_THEME
+
+
+def describe_theme_choice(choice: str, resolved: str = "") -> str:
+    """给人看的主题说明。自动挡会顺带报出这次实际挑中的那套。"""
+    if not is_auto_theme(choice):
+        return theme_label(normalize_theme(choice))
+    if resolved and normalize_theme(resolved) in THEMES:
+        return f"{AUTO_THEME_META['label']} · 本次 {theme_label(normalize_theme(resolved))}"
+    return AUTO_THEME_META["label"]
+
+
+#: 「棱镜主题」允许的额外别名（除了主题名和中文名之外）。
+THEME_ALIASES: dict[str, str] = {
+    "自动": AUTO_THEME,
+    "自动挡": AUTO_THEME,
+    "随机": AUTO_THEME,
+}
+
+
+def match_theme_choice(text: str) -> str:
+    """把用户输入认成一个档位。认不出来返回空串。"""
+    wanted = str(text or "").strip().lower()
+    if not wanted:
+        return ""
+    if wanted in THEME_CHOICES:
+        return wanted
+    for name, meta in THEME_CHOICES.items():
+        if wanted == meta["label"].lower():
+            return name
+    return THEME_ALIASES.get(wanted, "")
+
+def _theme_signal_text(portrait: Portrait | None) -> tuple[str, str]:
+    """把画像压成两段文本：strong（标题/标签/维度名）与 weak（正文/原话/建议）。"""
+    if portrait is None:
+        return "", ""
+    strong = [portrait.headline]
+    strong += [tag.label for tag in portrait.tags]
+    strong += [dim.name for dim in portrait.dimensions]
+    strong += [section.title for section in portrait.sections]
+    weak = [dim.note for dim in portrait.dimensions]
+    weak += [section.body for section in portrait.sections]
+    weak += [item.reason for item in portrait.evidence]
+    weak += list(portrait.advice)
+    if not portrait.structured:
+        weak.append(portrait.raw_text)
+    return " ".join(filter(None, strong)), " ".join(filter(None, weak))
+
+
+def _stable_jitter(seed: str, theme: str) -> float:
+    """0 ≤ x < 1 的稳定抖动。
+
+    用 blake2b 而不是内置 hash()：后者对 str 加了进程级随机盐，
+    换一次进程同一张画像就会换主题，测试也没法写。
+    """
+    digest = hashlib.blake2b(f"{seed}|{theme}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") / float(1 << 64)
+
+
+def theme_affinity(portrait: Portrait | None) -> dict[str, float]:
+    """只看内容的「气质贴合度」原始分，不含运气也不含避重复。"""
+    scores = dict.fromkeys(THEMES, 0.0)
+    strong, weak = _theme_signal_text(portrait)
+    for name, words in THEME_KEYWORDS.items():
+        if name not in scores:
+            continue
+        for word in words:
+            # 每个词最多计一次：复读一个词不该把主题硬拽过去。
+            if word in strong:
+                scores[name] += _W_STRONG_HIT
+            elif word in weak:
+                scores[name] += _W_WEAK_HIT
+    if portrait is None:
+        return scores
+    for dim in portrait.dimensions:
+        for words, high, low in _DIMENSION_AXES:
+            if not any(word in dim.name for word in words):
+                continue
+            if dim.score >= _DIM_HIGH_AT:
+                scores[high] += _W_DIM_HIGH
+            elif dim.score <= _DIM_LOW_AT:
+                scores[low] += _W_DIM_LOW
+    tags = portrait.tags
+    if tags:
+        neg = sum(1 for tag in tags if tag.polarity == "negative") / len(tags)
+        pos = sum(1 for tag in tags if tag.polarity == "positive") / len(tags)
+        if neg >= 0.4:
+            scores["dossier"] += _W_POLARITY
+            scores["neon"] += _W_POLARITY / 2
+        elif pos >= 0.6:
+            scores["aurora"] += _W_POLARITY * 0.75
+            scores["paper"] += _W_POLARITY / 3
+    if 0 < portrait.confidence < 0.45:
+        # 语料少、结论虚 → 「档案未完成」的气质刚好对上。
+        scores["dossier"] += _W_CONFIDENCE
+    return scores
+
+
+def theme_scores(
+    portrait: Portrait | None,
+    *,
+    seed: str = "",
+    avoid: Sequence[str] = (),
+) -> dict[str, float]:
+    """自动挡的最终打分。分最高的那套就是结论。
+
+    三部分相加：
+
+    1. **内容分**：把 theme_affinity 的原始分归一化，最贴的那套得满分 _W_CONTENT。
+       归一化很关键——画像长短差别很大，长画像随手就能命中十几个词，
+       不归一化的话「文字多」会盖过「运气」和「避重复」，档位就退化成固定主题了。
+    2. **抖动**：由 seed 和主题名算出的稳定伪随机数，负责在气质难分时拍板。
+    3. **避重复**：本群最近用过的主题降权，让连着画的人不容易撞同一套。
+       唯一的例外是内容分一边倒的时候（见 _AVOID_SKIP_MARGIN），此时以内容为准。
+    """
+    affinity = theme_affinity(portrait)
+    top = max(affinity.values(), default=0.0)
+    content = {
+        name: (raw / top * _W_CONTENT if top > 0 else 0.0) for name, raw in affinity.items()
+    }
+    scores = {
+        name: value + _stable_jitter(seed, name) * _W_JITTER for name, value in content.items()
+    }
+    ranked = sorted(content.values(), reverse=True)
+    runner_up = ranked[1] if len(ranked) > 1 else 0.0
+    for index, used in enumerate(list(avoid)[: len(_AVOID_PENALTY)]):
+        if used not in scores:
+            continue
+        if content[used] - runner_up >= _AVOID_SKIP_MARGIN:
+            continue
+        scores[used] -= _AVOID_PENALTY[index]
+    return scores
+
+
+def pick_theme(
+    portrait: Portrait | None,
+    *,
+    seed: str = "",
+    avoid: Sequence[str] = (),
+) -> str:
+    """按画像内容挑一套主题。
+
+    确定性的：同一张画像 + 同一个 seed 永远挑出同一套（重渲染不会变脸）。
+    但画像内容每次分析都不一样，加上 avoid 排掉本群最近用过的，
+    实际效果就是「一群人轮着画，主题一直在换」。
+    """
+    scores = theme_scores(portrait, seed=seed, avoid=avoid)
+    # 先按分数，再按 THEMES 的固定顺序，保证结果可复现。
+    order = list(THEMES)
+    return max(order, key=lambda name: (scores[name], -order.index(name)))
+
+
+def resolve_theme(
+    choice: str,
+    portrait: Portrait | None = None,
+    *,
+    seed: str = "",
+    avoid: Sequence[str] = (),
+) -> str:
+    """把「配置层的档位」翻译成「真正用来渲染的主题」。"""
+    if is_auto_theme(choice):
+        return pick_theme(portrait, seed=seed, avoid=avoid)
+    return normalize_theme(choice)
 
 
 def _esc(value: Any) -> str:
@@ -1864,6 +2111,8 @@ class CardRenderer:
 
 
 __all__ = [
+    "AUTO_THEME",
+    "AUTO_THEME_META",
     "BACKEND_LABELS",
     "DEFAULT_THEME",
     "FONT_FALLBACK",
@@ -1871,6 +2120,9 @@ __all__ = [
     "FONT_MIME_BY_SUFFIX",
     "HELP_ACCENTS",
     "THEMES",
+    "THEME_ALIASES",
+    "THEME_CHOICES",
+    "THEME_KEYWORDS",
     "CardContext",
     "CardRenderer",
     "HelpCard",
@@ -1881,12 +2133,20 @@ __all__ = [
     "build_help_card_html",
     "build_markdown_card_html",
     "confidence_label",
+    "describe_theme_choice",
+    "is_auto_theme",
     "markdown_to_html",
+    "match_theme_choice",
     "neutralize_jinja",
     "normalize_theme",
+    "normalize_theme_choice",
+    "pick_theme",
     "radar_geometry",
     "resolve_font_source",
+    "resolve_theme",
     "sanitize_font_family",
     "sanitize_font_src",
+    "theme_affinity",
     "theme_label",
+    "theme_scores",
 ]

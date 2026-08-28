@@ -14,7 +14,7 @@ import re
 import time
 from typing import Any
 
-from .cards import BACKEND_LABELS, THEMES
+from .cards import BACKEND_LABELS, THEME_CHOICES, THEMES, theme_label
 from .config import DASHBOARD_WRITABLE, DEFAULTS, ConfigError
 from .models import PROFILE_FIELD_LABELS
 from .prompts import VALID_LAYOUTS, normalize_layout
@@ -50,7 +50,10 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
     "collect.strip_urls": {"label": "去除链接", "hint": "把 URL 从语料里摘掉，省 token。"},
     "collect.fold_repeats": {"label": "折叠重复刷屏", "hint": "同一句话重复多次时折叠成一条并标注次数。"},
     "render.backend": {"label": "渲染链路", "hint": "决定卡片图片由谁来出。"},
-    "render.theme": {"label": "默认卡片主题", "hint": "群内可用「棱镜主题」单独覆盖。"},
+    "render.theme": {
+        "label": "默认卡片主题",
+        "hint": "群内可用「棱镜主题」单独覆盖。选「自动挡」就按每张画像的性子临场挑一套。",
+    },
     "render.card_scale": {
         "label": "卡片清晰度",
         "hint": "以百分比放大卡片像素。200 = 两倍分辨率，越高越清晰也越大越慢。",
@@ -253,6 +256,7 @@ def build_overview(
                 "自动",
             ),
             "theme": config.str_of("render.theme"),
+            "theme_label": theme_label(config.str_of("render.theme")),
             "last_backend": backend_hint,
             "backend_labels": BACKEND_LABELS,
         },
@@ -364,7 +368,8 @@ def _field_meta(path: str) -> dict[str, Any]:
     elif path == "render.theme":
         meta["type"] = "choice"
         meta["choices"] = [
-            {"value": name, "label": info["label"], "hint": info["desc"]} for name, info in THEMES.items()
+            {"value": name, "label": info["label"], "hint": info["desc"]}
+            for name, info in THEME_CHOICES.items()
         ]
     elif path == "privacy.include_profile_fields":
         meta["type"] = "multi"

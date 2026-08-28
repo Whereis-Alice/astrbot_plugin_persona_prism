@@ -606,6 +606,17 @@ class PrismStore:
         rows = self._query(sql, params)
         return PortraitRecord.from_row(rows[0]) if rows else None
 
+    def recent_themes(self, platform: str, group_id: str, limit: int = 2) -> list[str]:
+        """本群最近几张卡用过的主题，最近的在前。自动挡靠它避免连着撞主题。"""
+        rows = self._query(
+            """
+            SELECT theme FROM portraits
+            WHERE platform = ? AND group_id = ? AND theme != ''
+            ORDER BY created_at DESC, id DESC LIMIT ?
+            """,
+            (platform, group_id, max(1, limit)),
+        )
+        return [str(row["theme"]) for row in rows]
     def user_history(
         self,
         platform: str,

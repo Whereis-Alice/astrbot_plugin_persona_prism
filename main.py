@@ -34,7 +34,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.1.5"
+PLUGIN_VERSION = "v1.1.6"
 
 #: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
 #: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
@@ -830,8 +830,20 @@ class PersonaPrismStar(Star):
                 umo=event.unified_msg_origin,
             )
 
-            theme = cards.normalize_theme(
+            theme_choice = cards.normalize_theme_choice(
                 await self.astore.group_theme(platform, group_id) or self.config.str_of("render.theme"),
+            )
+            # 自动挡：按这张画像的性子挑主题，并避开本群最近两张卡用过的那两套。
+            # 落库存的是挑中的真主题，所以 WebUI 里重看这条记录不会变脸。
+            theme = cards.resolve_theme(
+                theme_choice,
+                portrait,
+                seed=f"{platform}:{group_id}:{target_id}",
+                avoid=(
+                    await self.astore.recent_themes(platform, group_id, limit=2)
+                    if cards.is_auto_theme(theme_choice)
+                    else ()
+                ),
             )
             record = PortraitRecord(
                 platform=platform,
@@ -1319,8 +1331,19 @@ class PersonaPrismStar(Star):
                 prism_specs.append(spec)
 
         platform, group_id = self._scope(event)
-        theme = cards.normalize_theme(
+        theme_choice = cards.normalize_theme_choice(
             await self.astore.group_theme(platform, group_id) or self.config.str_of("render.theme"),
+        )
+        # 帮助卡没有画像可看，自动挡就单纯避开本群最近用过的那套，换个新鲜的。
+        theme = cards.resolve_theme(
+            theme_choice,
+            None,
+            seed=f"help:{platform}:{group_id}",
+            avoid=(
+                await self.astore.recent_themes(platform, group_id, limit=1)
+                if cards.is_auto_theme(theme_choice)
+                else ()
+            ),
         )
 
         # 一份数据同时喂给卡片和纯文本，避免两边说的话对不上。
@@ -1405,7 +1428,7 @@ class PersonaPrismStar(Star):
         lines += [
             "",
             f"当前渲染链路：{chain}",
-            f"本群卡片主题：{cards.theme_label(theme)}",
+            f"本群卡片主题：{cards.describe_theme_choice(theme_choice, theme)}",
             "棱镜系列出结构化卡片，画像系列出上游同款长文卡，两者互不影响。",
             "更详细的配置与记录管理请打开 WebUI 的「人格棱镜」页面。",
         ]
@@ -1427,7 +1450,7 @@ class PersonaPrismStar(Star):
                 (str(total), "条指令"),
                 (str(len(groups)), "个分类"),
                 (str(len(cards.THEMES)), "套卡片主题"),
-                (cards.theme_label(theme), "本群当前主题"),
+                (cards.theme_label(theme_choice), "本群当前主题"),
             ],
             footers=[
                 (
@@ -1707,29 +1730,34 @@ class PersonaPrismStar(Star):
         """查看或切换本群的卡片主题。"""
         platform, group_id = self._scope(event)
         argument = _strip_command(event.get_message_str() or "", "棱镜主题")
-        current = await self.astore.group_theme(platform, group_id) or self.config.str_of(
-            "render.theme",
+        current = cards.normalize_theme_choice(
+            await self.astore.group_theme(platform, group_id) or self.config.str_of("render.theme"),
         )
         if not argument:
             lines = [f"当前主题：{cards.theme_label(current)}（{current}）", "", "可选主题："]
-            lines += [f"  {name} · {meta['label']} —— {meta['desc']}" for name, meta in cards.THEMES.items()]
-            lines.append("")
-            lines.append("切换方式：棱镜主题 neon")
+            lines += [
+                f"  {name} · {meta['label']} —— {meta['desc']}" for name, meta in cards.THEME_CHOICES.items()
+            ]
+            lines += [
+                "",
+                "切换方式：棱镜主题 neon",
+                "选 auto 就是自动挡：每次按画像的性子挑一套，还会避开本群最近用过的。",
+            ]
             yield event.plain_result("\n".join(lines))
             return
         if not event.is_admin():
             yield event.plain_result("只有管理员可以切换本群主题。")
             return
-        wanted = argument.strip().lower()
-        matched = ""
-        for name, meta in cards.THEMES.items():
-            if wanted in {name, meta["label"]}:
-                matched = name
-                break
+        matched = cards.match_theme_choice(argument)
         if not matched:
             yield event.plain_result("没有这个主题，发送「棱镜主题」查看可选项。")
             return
         await self.astore.set_group_theme(platform, group_id, matched)
+        if cards.is_auto_theme(matched):
+            yield event.plain_result(
+                "本群卡片主题已切换为自动挡：以后每张卡都按画像的性子现挑一套，连着画不容易撞。",
+            )
+            return
         yield event.plain_result(f"本群卡片主题已切换为 {cards.theme_label(matched)}。")
 
     @filter.command("棱镜统计")

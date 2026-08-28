@@ -293,7 +293,10 @@ def test_build_settings_marks_enum_fields_as_choice(store, config):
     assert fields["render.backend"]["type"] == "choice"
     assert fields["collect.sampling"]["type"] == "choice"
     assert fields["render.theme"]["type"] == "choice"
-    assert len(fields["render.theme"]["choices"]) == 5
+    theme_values = [choice["value"] for choice in fields["render.theme"]["choices"]]
+    # 5 套真主题 + 自动挡
+    assert len(theme_values) == 6
+    assert theme_values[0] == "auto"
     assert fields["privacy.include_profile_fields"]["type"] == "multi"
 
 

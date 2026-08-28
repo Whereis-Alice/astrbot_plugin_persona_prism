@@ -564,7 +564,7 @@ function renderOverview(root) {
   const labels = render.backend_labels || {};
   append(kv, [
     kvRow("渲染链路", render.backend_label || render.backend || "—"),
-    kvRow("默认卡片主题", render.theme || "—"),
+    kvRow("默认卡片主题", render.theme_label || render.theme || "—"),
     kvRow("上次实际出图", labels[render.last_backend] || render.last_backend || "尚未渲染"),
   ]);
   rendering.body.appendChild(kv);

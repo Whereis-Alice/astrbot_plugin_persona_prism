@@ -139,6 +139,8 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
 )
 
 VALID_THEMES = ("aurora", "ink", "neon", "paper", "dossier")
+#: 配置项 render.theme 还多一个 "auto"（自动挡）：它不是配色，而是「按画像临场挑一套」。
+VALID_THEME_CHOICES = ("auto", *VALID_THEMES)
 VALID_BACKENDS = ("auto", "local_first", "t2i_only", "text_only")
 VALID_SAMPLING = ("layered", "recent")
 VALID_IMAGE_FORMATS = ("jpeg", "png")
@@ -156,7 +158,7 @@ VALID_CURSOR_FIELDS = (
 )
 
 _ENUMS: dict[str, tuple[str, ...]] = {
-    "render.theme": VALID_THEMES,
+    "render.theme": VALID_THEME_CHOICES,
     "render.backend": VALID_BACKENDS,
     "render.image_format": VALID_IMAGE_FORMATS,
     "collect.sampling": VALID_SAMPLING,
