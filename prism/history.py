@@ -3,13 +3,18 @@
 OneBot 的 get_group_msg_history 是本插件回溯群历史的唯一入口，而它的翻页语义在各家
 协议端实现里并不统一，具体有两个自由度：
 
-* 请求参数名叫 message_seq，但它实际认的编号可能是 message_seq，也可能是 message_id；
+* 锚点该取哪个编号：可能是 message_seq，也可能是 message_id（后者在部分实现里是负数）；
 * 返回的那一页数组，有的实现是「最旧 → 最新」，有的是「最新 → 最旧」，于是「这一页最旧
   的那条」到底在 messages[0] 还是 messages[-1] 也不固定。
 
 两个自由度组合出四种翻页方式。传错时协议端**不会报错**，而是原地返回同一批最新消息，
 表现得就像「群历史已经翻到头了」。所以这里把四种方式枚举出来，由调用方逐个试，
 并把实测可用的那种记进 scan_state 复用。
+
+还有第三个自由度：**参数名**。老一批协议端（go-cqhttp / NapCat / Lagrange）读的是
+message_seq，而 SnowLuma 这类只认 message_id、完全无视 message_seq，收到不认识的
+参数也只是静默忽略。所以 build_history_params 默认把同一个游标值同时写进两个参数名，
+让各家各读自己认的那个 —— 这不增加翻页方式的搜索空间，只是让请求体更通用。
 
 `probe_pagination` 是给「棱镜诊断」指令用的自检探针：它把四种方式各打一次，报出每次
 返回了多少条、与首页重叠多少、时间有没有真的往前走，让人一眼看出协议端认哪一种。
@@ -23,13 +28,18 @@ from dataclasses import dataclass, field
 from typing import Any
 
 __all__ = [
+    "PARAM_STYLES",
+    "PARAM_STYLE_LABELS",
     "STRATEGIES",
     "STRATEGY_ALIASES",
     "STRATEGY_LABELS",
     "ProbeAttempt",
     "ProbeReport",
     "anchor_of",
+    "build_history_params",
     "cursor_of",
+    "is_param_error",
+    "normalize_param_style",
     "normalize_strategy",
     "page_ids",
     "page_time_range",
@@ -70,6 +80,74 @@ _FIELD_KEYS: dict[str, tuple[str, ...]] = {
     "message_seq": ("message_seq", "real_seq"),
     "message_id": ("message_id",),
 }
+
+
+#: 请求体写法。游标的**值**由上面四种方式决定，这里只决定它写进哪个参数名。
+#:
+#: * dual —— 同时写 message_seq 和 message_id（也同时给 reverseOrder / reverse_order
+#:   两种拼写）。各家协议端的参数校验都是「忽略不认识的键」，所以这样最通用，是默认值。
+#: * seq  —— 只写 message_seq，v1.1.6 及之前的老写法，留作兜底。
+#: * id   —— 只写 message_id，SnowLuma 的原生写法。
+PARAM_STYLES: tuple[str, ...] = ("dual", "seq", "id")
+
+PARAM_STYLE_LABELS: dict[str, str] = {
+    "dual": "message_seq + message_id（两种都写）",
+    "seq": "只写 message_seq",
+    "id": "只写 message_id",
+}
+
+
+def normalize_param_style(value: Any) -> str:
+    """把请求体写法归一成合法值，无法识别时返回默认的 dual。"""
+    name = str(value or "").strip().lower()
+    return name if name in PARAM_STYLES else "dual"
+
+
+def build_history_params(
+    group_id: Any,
+    cursor: int | None,
+    count: int,
+    *,
+    style: str = "dual",
+) -> dict[str, Any]:
+    """拼出 get_group_msg_history 的请求体。
+
+    cursor 为 None 表示「取最新一页」，此时各家的约定都是传 0 或干脆不传，这里统一传 0。
+    count 会被夹到 1~200：SnowLuma 明确把超过 200 的值截断，其它实现也基本是这个量级。
+    """
+    anchor = int(cursor or 0)
+    size = max(1, min(200, int(count or 0) or 1))
+    params: dict[str, Any] = {"group_id": int(group_id), "count": size}
+    name = normalize_param_style(style)
+    if name in ("dual", "seq"):
+        params["message_seq"] = anchor
+        #: 老实现读的是驼峰拼写。
+        params["reverseOrder"] = True
+    if name in ("dual", "id"):
+        params["message_id"] = anchor
+        #: SnowLuma 读的是下划线拼写，且只在锚点非 0 时生效。
+        params["reverse_order"] = True
+    return params
+
+#: 「这个报错像是参数没被接受」的判据。请求体带了对方不认识的键时，宽松的实现静默忽略、
+#: 严格的实现直接报错；只有后者才值得换一种写法重试。网络超时、动作不支持、权限不足这些
+#: 换写法也救不了，重试只是白等，所以必须区分开。
+_PARAM_ERROR_HINTS: tuple[str, ...] = (
+    "param",
+    "参数",
+    "1400",
+    "bad request",
+    "unexpected keyword",
+    "additionalproperties",
+    "schema",
+    "validation",
+)
+
+
+def is_param_error(exc: BaseException) -> bool:
+    """判断这个异常是不是"协议端不接受请求体里的某个参数"。"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(hint in text for hint in _PARAM_ERROR_HINTS)
 
 
 # --------------------------------------------------------------------------
@@ -211,9 +289,13 @@ class ProbeAttempt:
 class ProbeReport:
     """一次「棱镜诊断」的完整结果。"""
 
-    #: 首页（message_seq=0）的情况。首页都拿不到就没必要往下试了。
+    #: 首页（游标传 0）的情况。首页都拿不到就没必要往下试了。
     ok: bool = False
     error: str = ""
+    #: 协议端自报的实现名与版本，例如 "SnowLuma 1.2.3"。拿不到就留空。
+    impl: str = ""
+    #: 实际生效的请求体写法（PARAM_STYLES 之一）。
+    param_style: str = "dual"
     base_total: int = 0
     base_oldest: int = 0
     base_newest: int = 0
@@ -326,6 +408,12 @@ def render_probe(report: ProbeReport, *, page_size: int) -> list[str]:
     lines = [
         f"翻页自检（本群，每次只拉 {page_size} 条，不写入语料库）",
         "",
+    ]
+    if report.impl:
+        lines.append(f"协议端：{report.impl}")
+    lines.append(f"请求体写法：{PARAM_STYLE_LABELS.get(report.param_style, report.param_style)}")
+    lines += [
+        "",
         f"第一页：{report.base_total} 条，时间 {_stamp(report.base_oldest)} ~ {_stamp(report.base_newest)}",
         f"  首条 message_seq={_num(report.first_seq)} / message_id={_num(report.first_id)}",
         f"  末条 message_seq={_num(report.last_seq)} / message_id={_num(report.last_id)}",
@@ -364,10 +452,13 @@ def render_probe(report: ProbeReport, *, page_size: int) -> list[str]:
     lines.append("")
     if report.winner:
         lines.append(f"结论：本群可用「{strategy_label(report.winner)}」，已记下来给下次回溯用。")
+        if report.winner.startswith("id_"):
+            lines.append("本协议端只认 message_id 当锚点（SnowLuma 就属于这一类）。")
         lines.append("现在发一次画像指令，再发「棱镜缓存」，「已往前翻过 N 页」应该会涨起来。")
     else:
-        lines.append("结论：四种方式都翻不动，当前协议端的 get_group_msg_history 没有实现分页。")
-        lines.append("只能靠被动采集慢慢攒语料；换 NapCat / Lagrange / go-cqhttp 之类的协议端可解决。")
+        lines.append("结论：四种方式都翻不动，当前协议端的 get_group_msg_history 没有实现分页，")
+        lines.append("或者它不认我们传的锚点参数名（已自动同时试过 message_seq 与 message_id 两种写法）。")
+        lines.append("只能靠被动采集慢慢攒语料；换 NapCat / Lagrange / SnowLuma 之类的协议端可解决。")
 
     if report.parsed > 0:
         lines.append("")

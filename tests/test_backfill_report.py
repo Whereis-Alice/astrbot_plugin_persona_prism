@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import time
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -166,8 +166,10 @@ def _star(config: FakeConfig, store: FakeStore) -> SimpleNamespace:
         astore=store,
         _is_own_command=lambda text: False,
     )
+    star._param_style = {}
     star._scan_plan = main.PersonaPrismStar._scan_plan.__get__(star)
     star._backfill = main.PersonaPrismStar._backfill.__get__(star)
+    star._fetch_history_page = main.PersonaPrismStar._fetch_history_page.__get__(star)
     return star
 
 
@@ -646,3 +648,115 @@ def test_backfill_restarts_when_remembered_cursor_is_dead():
     #: 重挖是从最新一页开始的，深度要归零重新数。
     depth_writes = [item["depth_pages"] for item in store.state_updates if item["depth_pages"] >= 0]
     assert depth_writes == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# 协议端兼容：只认 message_id 的 SnowLuma / 拒收未知参数的严格实现
+# ---------------------------------------------------------------------------
+
+
+class SnowLumaApi:
+    """只认 message_id 锚点的协议端，SnowLuma 就是这一类。
+
+    行为按其源码复刻：message_seq 一律无视；message_id=0 取最新一页；锚点必须是它
+    自己发出过的 message_id，否则返回空数组（不报错、也不退回最新页）；返回升序，
+    锚点本身包含在这一页的末尾。
+    """
+
+    def __init__(self, total: int = 60, page: int = 20) -> None:
+        #: message_id 用负数，贴近真实实现里的 signed int32 hash。
+        self.timeline = [
+            {
+                "message_id": -(1000 + index),
+                "message_seq": 500 + index,
+                "time": 1_700_000_000 + index,
+                "sender": {"user_id": "42", "nickname": "狐狸"},
+                "message": [
+                    {"type": "text", "data": {"text": f"第 {index} 条历史消息，说点有内容的话"}},
+                ],
+            }
+            for index in range(total)
+        ]
+        self.page = page
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_action(self, action: str, **kwargs: Any) -> Any:
+        self.calls.append({"action": action, **kwargs})
+        anchor = int(kwargs.get("message_id") or 0)
+        if anchor == 0:
+            return {"messages": self.timeline[-self.page :]}
+        found = next(
+            (pos for pos, row in enumerate(self.timeline) if row["message_id"] == anchor),
+            None,
+        )
+        if found is None:
+            return {"messages": []}
+        start = max(0, found + 1 - self.page)
+        return {"messages": self.timeline[start : found + 1]}
+
+
+def test_backfill_adapts_to_message_id_only_protocol():
+    """SnowLuma 这类协议端：默认的 seq 游标一翻就空，应当自愈到 message_id。"""
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 4, "collect.page_size": 20}), store)
+    api = SnowLumaApi()
+    report = _run_backfill(star, SimpleNamespace(bot=SimpleNamespace(api=api)))
+    assert report.error == ""
+    assert report.cursor_switched is True
+    assert report.cursor_field == "id_first"
+    assert report.pages == 4
+    #: 60 条时间线全部翻到了；每页含锚点本身，所以相邻页重叠 1 条，
+    #: 63 = 60 + 3 个重叠锚点（真实库按 message_id 去重，假库只记条数）。
+    assert report.scanned == 63
+    assert sum(store.writes) == 63
+    #: 可用的方式要落库，下次回溯直接用，不必再空翻一次。
+    assert "id_first" in [item["cursor_field"] for item in store.state_updates]
+
+
+def test_backfill_sends_both_anchor_names_by_default():
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 1, "collect.page_size": 20}), FakeStore())
+    api = SnowLumaApi()
+    _run_backfill(star, SimpleNamespace(bot=SimpleNamespace(api=api)))
+    first = api.calls[0]
+    assert first["message_seq"] == 0
+    assert first["message_id"] == 0
+    assert first["reverseOrder"] is True
+    assert first["reverse_order"] is True
+
+
+class StrictSeqApi:
+    """只接受 message_seq 一套参数、收到未知键就报错的严格协议端。"""
+
+    ALLOWED: ClassVar[set[str]] = {"group_id", "count", "message_seq", "reverseOrder"}
+
+    def __init__(self, pages: list[list[dict[str, Any]]]) -> None:
+        self.pages = pages
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_action(self, action: str, **kwargs: Any) -> Any:
+        self.calls.append({"action": action, **kwargs})
+        unknown = sorted(set(kwargs) - self.ALLOWED)
+        if unknown:
+            raise ValueError(f"unknown parameter: {unknown}")
+        cursor = int(kwargs.get("message_seq") or 0)
+        if cursor == 0:
+            return {"messages": self.pages[0]}
+        for index, page in enumerate(self.pages):
+            if int(page[0]["message_seq"]) == cursor:
+                nxt = index + 1
+                return {"messages": self.pages[nxt] if nxt < len(self.pages) else []}
+        return {"messages": []}
+
+
+def test_backfill_falls_back_when_extra_params_rejected():
+    """严格实现会拒收 message_id，此时应退回只写 message_seq 而不是整体失败。"""
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 3, "collect.page_size": 20}), store)
+    api = StrictSeqApi([_page(300, 20), _page(280, 20), _page(260, 20)])
+    report = _run_backfill(star, SimpleNamespace(bot=SimpleNamespace(api=api)))
+    assert report.error == ""
+    assert report.pages == 3
+    assert star._param_style["aiocqhttp"] == "seq"
+    #: 只在第一次请求上试过 dual 写法，之后不再重复试错。
+    assert len([call for call in api.calls if "message_id" in call]) == 1
+

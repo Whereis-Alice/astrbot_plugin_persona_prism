@@ -24,7 +24,7 @@ from . import history
 ERROR_BRIEF_MAX = 80
 
 #: 已知支持主动拉取群历史（get_group_msg_history）的平台适配器。
-#: OneBot v11 系（NapCat / Lagrange / LLOneBot / Shamrock / go-cqhttp 及
+#: OneBot v11 系（NapCat / Lagrange / LLOneBot / Shamrock / go-cqhttp / SnowLuma 及
 #: Lucky Lillia Bot 等实现）在 AstrBot 里统一走 aiocqhttp 适配器。
 BACKFILL_PLATFORMS: frozenset[str] = frozenset({"aiocqhttp"})
 

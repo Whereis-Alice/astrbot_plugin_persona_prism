@@ -266,3 +266,71 @@ def test_render_probe_omits_funnel_when_not_sampled():
     assert "清洗漏斗" not in text
     assert "不写入语料库" in text
 
+
+# ---------------------------------------------------------------------------
+# 请求体写法（参数名的第三个自由度）
+# ---------------------------------------------------------------------------
+
+
+def test_build_history_params_dual_writes_both_names():
+    params = history.build_history_params("10086", 4321, 200)
+    assert params["group_id"] == 10086
+    assert params["count"] == 200
+    #: 同一个游标值写进两个参数名，各家协议端各读自己认的那个。
+    assert params["message_seq"] == 4321
+    assert params["message_id"] == 4321
+    #: 两种拼写的倒序开关都给上：老实现读驼峰，SnowLuma 读下划线。
+    assert params["reverseOrder"] is True
+    assert params["reverse_order"] is True
+
+
+def test_build_history_params_single_styles():
+    seq_only = history.build_history_params("1", 77, 20, style="seq")
+    assert "message_id" not in seq_only
+    assert "reverse_order" not in seq_only
+    assert seq_only["message_seq"] == 77
+
+    id_only = history.build_history_params("1", 77, 20, style="id")
+    assert "message_seq" not in id_only
+    assert "reverseOrder" not in id_only
+    assert id_only["message_id"] == 77
+
+
+def test_build_history_params_first_page_uses_zero():
+    params = history.build_history_params("1", None, 20)
+    assert params["message_seq"] == 0
+    assert params["message_id"] == 0
+
+
+def test_build_history_params_accepts_negative_anchor():
+    #: SnowLuma 的 message_id 是 signed int32 hash，负数是常态。
+    params = history.build_history_params("1", -1234567, 20, style="id")
+    assert params["message_id"] == -1234567
+
+
+def test_build_history_params_clamps_count():
+    #: SnowLuma 明确把超过 200 的 count 截断，其它实现也是这个量级。
+    assert history.build_history_params("1", 0, 500)["count"] == 200
+    assert history.build_history_params("1", 0, 0)["count"] == 1
+    assert history.build_history_params("1", 0, -5)["count"] == 1
+
+
+def test_normalize_param_style_falls_back_to_dual():
+    assert history.normalize_param_style("ID") == "id"
+    assert history.normalize_param_style("seq") == "seq"
+    assert history.normalize_param_style("") == "dual"
+    assert history.normalize_param_style("whatever") == "dual"
+
+
+def test_render_probe_shows_impl_and_param_style():
+    report = history.ProbeReport(ok=True, base_total=20, impl="SnowLuma 1.4.0", param_style="id")
+    text = "\n".join(history.render_probe(report, page_size=20))
+    assert "SnowLuma 1.4.0" in text
+    assert "只写 message_id" in text
+
+
+def test_render_probe_hints_message_id_protocols():
+    report = history.ProbeReport(ok=True, base_total=20, winner="id_first")
+    text = "\n".join(history.render_probe(report, page_size=20))
+    assert "SnowLuma" in text
+

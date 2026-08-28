@@ -34,7 +34,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.1.6"
+PLUGIN_VERSION = "v1.1.7"
 
 #: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
 #: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
@@ -189,6 +189,10 @@ class PersonaPrismStar(Star):
         self._inflight: set[str] = set()
         self._last_backend = ""
         self._last_maintenance = 0.0
+        #: 每个平台实测可用的请求体写法（history.PARAM_STYLES 之一）。
+        #: 默认的 dual 写法覆盖所有已知协议端，只有遇到"未知参数直接报错"的严格实现
+        #: 才会退到单参数写法，退成功后记在这里，同一进程内不再重复试错。
+        self._param_style: dict[str, str] = {}
 
         self._register_dashboard_apis()
         logger.info("[人格棱镜] %s 已加载，数据目录：%s", PLUGIN_VERSION, self.data_dir)
@@ -370,6 +374,48 @@ class PersonaPrismStar(Star):
         with contextlib.suppress(Exception):
             await self.astore.add_messages(platform, group_id, cleaned)
 
+    async def _fetch_history_page(
+        self,
+        client: Any,
+        platform: str,
+        group_id: str,
+        cursor: int | None,
+        count: int,
+    ) -> Any:
+        """拉一页群历史，返回 messages 列表（拿不到就返回 None / 空列表）。
+
+        各家协议端认的锚点参数名不一样：老一批读 message_seq，SnowLuma 只读 message_id。
+        默认的 dual 写法把同一个游标值同时写进两个名字，谁认哪个读哪个，不认的那个会被
+        静默忽略（各家的参数校验都是宽进）。
+
+        万一碰上对未知参数直接报错的严格实现，就依次退到只写 message_seq / 只写
+        message_id，成功的写法记进 self._param_style，同一进程内不再重复试错。只有"看着
+        像参数没被接受"的报错才换写法重试 —— 超时、动作不支持、权限不足换写法也救不了，
+        重试只会让用户多等，那类异常直接抛出去按老路记进诊断。
+        """
+        settled = platform in self._param_style
+        primary = history.normalize_param_style(self._param_style.get(platform))
+        order = [primary]
+        if not settled:
+            order += [name for name in history.PARAM_STYLES if name != primary]
+        for index, name in enumerate(order):
+            params = history.build_history_params(group_id, cursor, count, style=name)
+            try:
+                payload = await client.api.call_action("get_group_msg_history", **params)
+            except Exception as exc:
+                #: 不像参数问题、或已经没有别的写法可试 —— 交给调用方按原样处理。
+                if index + 1 >= len(order) or not history.is_param_error(exc):
+                    raise
+                logger.debug("[人格棱镜] 群历史请求被拒（写法 %s）：%s，换一种写法重试", name, exc)
+                continue
+            if name != primary:
+                logger.info("[人格棱镜] 群历史请求体退回「%s」写法并成功", name)
+            self._param_style[platform] = name
+            if isinstance(payload, dict):
+                return payload.get("messages")
+            return payload
+        return None
+
     def _scan_plan(self, platform: str, group_id: str) -> scanning.ScanReport:
         """按当前配置生成一份"回溯计划"。
 
@@ -397,9 +443,12 @@ class PersonaPrismStar(Star):
         """向更早的历史翻页，直到攒够目标条数或真的翻到头。
 
         协议端的坑：get_group_msg_history 的翻页语义在各家 OneBot 实现里有两个自由度
-        —— message_seq 参数认的可能是 message_seq 也可能是 message_id，返回的那一页
-        数组可能是最旧在前也可能最新在前。传错了**不会报错**，而是原地返回同一批最新
-        消息。所以不能靠"游标没变"来判断是否挖到头，必须看这一页有没有出现新的消息。
+        —— 锚点认的可能是 message_seq 也可能是 message_id，返回的那一页数组可能是最旧
+        在前也可能最新在前。传错了**不会报错**，而是原地返回同一批最新消息。所以不能靠
+        "游标没变"来判断是否挖到头，必须看这一页有没有出现新的消息。
+
+        还有第三个坑是参数名：SnowLuma 只读 message_id、完全无视 message_seq。请求体的
+        拼装交给 _fetch_history_page，默认两个参数名一起写。
 
         做法：
         * 每页用消息 ID 集合和上一页比对，出现新面孔才算真的前进；
@@ -481,19 +530,18 @@ class PersonaPrismStar(Star):
         while index < rounds:
             index += 1
             try:
-                payload = await client.api.call_action(
-                    "get_group_msg_history",
-                    group_id=int(group_id),
-                    message_seq=cursor or 0,
-                    count=page_size,
-                    reverseOrder=True,
+                messages = await self._fetch_history_page(
+                    client,
+                    platform,
+                    group_id,
+                    cursor,
+                    page_size,
                 )
             except Exception as exc:
                 logger.debug("[人格棱镜] 拉取群历史失败（第 %s 页）：%s", index, exc)
                 report.error = scanning.brief_error(exc)
                 break
 
-            messages = (payload or {}).get("messages") if isinstance(payload, dict) else payload
             if not messages:
                 #: 空页有三种可能，从"最可能是我们的错"往"真的没有了"依次排除：
                 #: 1) 游标字段喂错了 —— 协议端不认这个值，于是回空数组而不是报错；
@@ -1675,18 +1723,20 @@ class PersonaPrismStar(Star):
         probe_size = 20
 
         async def fetch(cursor: int) -> Any:
-            payload = await client.api.call_action(
-                "get_group_msg_history",
-                group_id=int(group_id),
-                message_seq=cursor,
-                count=probe_size,
-                reverseOrder=True,
-            )
-            if isinstance(payload, dict):
-                return payload.get("messages")
-            return payload
+            return await self._fetch_history_page(client, platform, group_id, cursor, probe_size)
+
+        #: 协议端自报的实现名，直接写进诊断结论里，省得再问一遍"你用的什么端"。
+        impl = ""
+        with contextlib.suppress(Exception):
+            info = await client.api.call_action("get_version_info")
+            if isinstance(info, dict):
+                name = str(info.get("app_name") or "").strip()
+                ver = str(info.get("app_version") or "").strip()
+                impl = f"{name} {ver}".strip()
 
         report = await history.probe_pagination(fetch, brief=scanning.brief_error)
+        report.impl = impl
+        report.param_style = history.normalize_param_style(self._param_style.get(platform))
 
         #: 清洗漏斗：同一批首页消息，分别按当前配置和最宽松口径过一遍，
         #: 让\"群里很热闹但只提取到几条\"这类问题能区分是翻页问题还是清洗太严。
