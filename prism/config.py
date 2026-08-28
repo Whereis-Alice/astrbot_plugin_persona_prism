@@ -80,6 +80,7 @@ DEFAULTS: dict[str, dict[str, Any]] = {
     },
     "behavior": {
         "quiet_progress": False,
+        "help_card": True,
         "history_limit": 20,
         "allow_self_only": False,
         "enabled_groups": [],
@@ -126,6 +127,7 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "inject.max_chars",
         "inject.max_age_days",
         "behavior.quiet_progress",
+        "behavior.help_card",
         "behavior.history_limit",
         "behavior.allow_self_only",
         "behavior.enabled_groups",

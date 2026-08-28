@@ -112,6 +112,10 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "静默模式",
         "hint": "不发进度提示；样本不足时的采集诊断仍会保留，方便排查回溯有没有成功。",
     },
+    "behavior.help_card": {
+        "label": "帮助出卡片",
+        "hint": "「棱镜帮助」渲染成指令速查卡；渲染失败会自动回落成纯文本。",
+    },
     "behavior.history_limit": {"label": "每人保留历史条数", "hint": "超出的旧记录自动清理。"},
     "behavior.allow_self_only": {"label": "只允许画自己", "hint": "开启后不能对他人发起画像。"},
     "behavior.enabled_groups": {"label": "生效群列表", "hint": "留空表示所有群都生效。"},

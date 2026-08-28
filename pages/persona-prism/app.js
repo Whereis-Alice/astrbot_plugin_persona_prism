@@ -913,15 +913,252 @@ async function loadCardPreview(recordId) {
       slot.appendChild(make("p", "field__hint", data.reason || "该记录没有可预览的图片。"));
       return;
     }
+    const caption = state.detail
+      ? state.detail.user_name + " · " + (state.detail.kind_label || "画像卡片")
+      : "画像卡片";
+    const frame = make("button", "cardpreview__frame");
+    frame.type = "button";
+    frame.title = "点击放大，可缩放与拖动";
     const img = make("img");
     img.src = data.data_url;
     img.alt = "画像卡片预览";
     img.loading = "lazy";
-    slot.appendChild(img);
-    slot.appendChild(make("p", "field__hint", "卡片文件约 " + fmtBytes(data.bytes)));
+    frame.appendChild(img);
+    frame.appendChild(append(make("span", "cardpreview__zoom"), [icon("i-search", 14), make("span", "", "点击放大")]));
+    frame.addEventListener("click", () => openLightbox(data.data_url, caption));
+    slot.appendChild(frame);
+    slot.appendChild(make("p", "field__hint", "卡片文件约 " + fmtBytes(data.bytes) + " · 滚轮缩放，按住拖动，Esc 关闭"));
   } catch (err) {
     clear(slot);
     slot.appendChild(make("p", "field__hint", "预览失败：" + err.message));
+  }
+}
+
+/* ------------------------------------------------------- 卡片灯箱（放大查看） */
+
+/* 抽屉里的缩略图看不清长卡片，所以做一个全屏查看器：滚轮缩放（以指针为锚点）、
+   按住拖动平移、双击在「适应窗口」和「原始尺寸」之间切换、Esc 关闭。
+   刻意不依赖任何库，也不改动主题变量以外的样式，四套主题下都是同一套交互。 */
+const LB_MIN_SCALE = 0.1;
+const LB_MAX_SCALE = 8;
+
+const lightbox = {
+  root: null,
+  img: null,
+  stage: null,
+  level: null,
+  scale: 1,
+  fit: 1,
+  x: 0,
+  y: 0,
+  drag: null,
+};
+
+function lbApply() {
+  if (!lightbox.img) {
+    return;
+  }
+  const parts = [
+    "translate(-50%, -50%)",
+    "translate(" + Math.round(lightbox.x) + "px, " + Math.round(lightbox.y) + "px)",
+    "scale(" + lightbox.scale.toFixed(4) + ")",
+  ];
+  lightbox.img.style.transform = parts.join(" ");
+  if (lightbox.level) {
+    lightbox.level.textContent = Math.round(lightbox.scale * 100) + "%";
+  }
+}
+
+function lbFitScale() {
+  const img = lightbox.img;
+  const stage = lightbox.stage;
+  if (!img || !stage || !img.naturalWidth || !img.naturalHeight) {
+    return 1;
+  }
+  const box = stage.getBoundingClientRect();
+  const pad = 32;
+  const ratio = Math.min(
+    (box.width - pad) / img.naturalWidth,
+    (box.height - pad) / img.naturalHeight,
+  );
+  return Math.max(LB_MIN_SCALE, Math.min(LB_MAX_SCALE, ratio || 1));
+}
+
+function lbReset(mode) {
+  lightbox.fit = lbFitScale();
+  lightbox.scale = mode === "actual" ? 1 : lightbox.fit;
+  lightbox.x = 0;
+  lightbox.y = 0;
+  lbApply();
+}
+
+/* 以某个屏幕坐标为锚点缩放：锚点下的那一块图像保持不动，符合看图的直觉。 */
+function lbZoom(factor, anchorX, anchorY) {
+  const next = Math.max(LB_MIN_SCALE, Math.min(LB_MAX_SCALE, lightbox.scale * factor));
+  const ratio = next / lightbox.scale;
+  if (ratio === 1) {
+    return;
+  }
+  const box = lightbox.stage.getBoundingClientRect();
+  const cx = (anchorX === undefined ? box.left + box.width / 2 : anchorX) - (box.left + box.width / 2);
+  const cy = (anchorY === undefined ? box.top + box.height / 2 : anchorY) - (box.top + box.height / 2);
+  lightbox.x = cx - ratio * (cx - lightbox.x);
+  lightbox.y = cy - ratio * (cy - lightbox.y);
+  lightbox.scale = next;
+  lbApply();
+}
+
+function lbButton(label, title, handler, iconName) {
+  const node = make("button", "lightbox__btn");
+  node.type = "button";
+  node.title = title;
+  node.setAttribute("aria-label", title);
+  if (iconName) {
+    node.appendChild(icon(iconName, 16));
+  } else {
+    node.textContent = label;
+  }
+  node.addEventListener("click", (event) => {
+    event.stopPropagation();
+    handler();
+  });
+  return node;
+}
+
+function closeLightbox() {
+  if (!lightbox.root) {
+    return;
+  }
+  lightbox.root.remove();
+  lightbox.root = null;
+  lightbox.img = null;
+  lightbox.stage = null;
+  lightbox.level = null;
+  lightbox.drag = null;
+  document.body.classList.remove("is-lightbox");
+}
+
+function openLightbox(src, caption) {
+  closeLightbox();
+  const root = make("div", "lightbox");
+  root.setAttribute("role", "dialog");
+  root.setAttribute("aria-modal", "true");
+  root.setAttribute("aria-label", "卡片预览");
+
+  const stage = make("div", "lightbox__stage");
+  const img = make("img", "lightbox__img");
+  img.src = src;
+  img.alt = caption || "画像卡片预览";
+  img.draggable = false;
+  stage.appendChild(img);
+
+  const bar = make("div", "lightbox__bar");
+  const text = make("div", "lightbox__text");
+  append(text, [
+    make("p", "lightbox__title", caption || "画像卡片"),
+    make("p", "lightbox__hint", "滚轮缩放 · 按住拖动 · 双击切换原始尺寸 · Esc 关闭"),
+  ]);
+  const level = make("span", "lightbox__level", "100%");
+  const tools = make("div", "lightbox__tools");
+  append(tools, [
+    level,
+    lbButton("－", "缩小", () => lbZoom(1 / 1.25)),
+    lbButton("＋", "放大", () => lbZoom(1.25)),
+    lbButton("适应", "适应窗口", () => lbReset("fit")),
+    lbButton("1:1", "原始尺寸", () => lbReset("actual")),
+    lbButton("", "关闭", closeLightbox, "i-close"),
+  ]);
+  append(bar, [text, tools]);
+  append(root, [bar, stage]);
+
+  lightbox.root = root;
+  lightbox.img = img;
+  lightbox.stage = stage;
+  lightbox.level = level;
+
+  /* 图片是 data URL，多数情况下 complete 已经为 true，但仍要兼容异步解码。 */
+  if (img.complete && img.naturalWidth) {
+    lbReset("fit");
+  } else {
+    img.addEventListener("load", () => lbReset("fit"), { once: true });
+  }
+
+  stage.addEventListener(
+    "wheel",
+    (event) => {
+      event.preventDefault();
+      const step = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+      lbZoom(step, event.clientX, event.clientY);
+    },
+    { passive: false },
+  );
+
+  stage.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    lightbox.drag = { id: event.pointerId, x: event.clientX, y: event.clientY, moved: 0 };
+    stage.classList.add("is-drag");
+    if (stage.setPointerCapture) {
+      stage.setPointerCapture(event.pointerId);
+    }
+  });
+
+  stage.addEventListener("pointermove", (event) => {
+    const drag = lightbox.drag;
+    if (!drag || drag.id !== event.pointerId) {
+      return;
+    }
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    drag.x = event.clientX;
+    drag.y = event.clientY;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    lightbox.x += dx;
+    lightbox.y += dy;
+    lbApply();
+  });
+
+  const endDrag = (event) => {
+    const drag = lightbox.drag;
+    if (!drag || drag.id !== event.pointerId) {
+      return;
+    }
+    lightbox.drag = null;
+    stage.classList.remove("is-drag");
+    /* 没拖动过 + 点在空白处 = 想关掉，别让误触把窗口关了。 */
+    if (drag.moved < 4 && event.target === stage) {
+      closeLightbox();
+    }
+  };
+  stage.addEventListener("pointerup", endDrag);
+  stage.addEventListener("pointercancel", endDrag);
+
+  stage.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    const zoomed = lightbox.scale > lightbox.fit * 1.02;
+    lbReset(zoomed ? "fit" : "actual");
+  });
+
+  document.body.appendChild(root);
+  document.body.classList.add("is-lightbox");
+  window.addEventListener("resize", lbOnResize);
+}
+
+/* 窗口尺寸变了，「适应窗口」的基准也跟着变；只有还停在适应视图时才重算，
+   否则会把用户手动放大的位置抹掉。 */
+function lbOnResize() {
+  if (!lightbox.root) {
+    window.removeEventListener("resize", lbOnResize);
+    return;
+  }
+  const wasFit = Math.abs(lightbox.scale - lightbox.fit) < 0.001;
+  lightbox.fit = lbFitScale();
+  if (wasFit) {
+    lightbox.scale = lightbox.fit;
+    lightbox.x = 0;
+    lightbox.y = 0;
+    lbApply();
   }
 }
 
@@ -1983,6 +2220,26 @@ function bindEvents() {
   });
 
   document.addEventListener("keydown", (event) => {
+    /* 灯箱开着的时候它吃掉所有快捷键：Esc 只关灯箱，不该顺手把抽屉也关掉。 */
+    if (lightbox.root) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeLightbox();
+      } else if (event.key === "+" || event.key === "=") {
+        event.preventDefault();
+        lbZoom(1.25);
+      } else if (event.key === "-" || event.key === "_") {
+        event.preventDefault();
+        lbZoom(1 / 1.25);
+      } else if (event.key === "0") {
+        event.preventDefault();
+        lbReset("fit");
+      } else if (event.key === "1") {
+        event.preventDefault();
+        lbReset("actual");
+      }
+      return;
+    }
     if (event.key !== "Escape") {
       return;
     }

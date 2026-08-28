@@ -86,6 +86,7 @@
   --shadow-2: 0 18px 48px rgba(3, 6, 18, 0.6);
   --shadow-3: 0 32px 80px rgba(2, 4, 14, 0.7);
   --scrim: rgba(6, 9, 20, 0.62);
+  --lb-bg: rgba(4, 6, 14, 0.92);
   --chart-1: #7c6cff;
   --chart-2: #37d3e8;
   --chart-3: #f5b74c;
@@ -122,6 +123,7 @@
   --shadow-2: 0 14px 38px rgba(19, 26, 51, 0.1);
   --shadow-3: 0 28px 70px rgba(19, 26, 51, 0.16);
   --scrim: rgba(19, 26, 51, 0.34);
+  --lb-bg: rgba(18, 24, 42, 0.72);
   --chart-1: #5b53f0;
   --chart-2: #0a9fb8;
   --chart-3: #d98404;
@@ -158,6 +160,7 @@
   --shadow-2: 0 18px 48px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(0, 240, 255, 0.08);
   --shadow-3: 0 30px 80px rgba(0, 0, 0, 0.8), 0 0 42px rgba(255, 46, 156, 0.14);
   --scrim: rgba(2, 4, 12, 0.7);
+  --lb-bg: rgba(1, 2, 8, 0.94);
   --chart-1: #ff2e9c;
   --chart-2: #00f0ff;
   --chart-3: #ffd23f;
@@ -194,6 +197,7 @@
   --shadow-2: 0 14px 36px rgba(60, 50, 34, 0.12);
   --shadow-3: 0 26px 64px rgba(60, 50, 34, 0.18);
   --scrim: rgba(36, 31, 24, 0.34);
+  --lb-bg: rgba(32, 27, 20, 0.82);
   --chart-1: #8c2f22;
   --chart-2: #3f5f4a;
   --chart-3: #9a6a12;
@@ -1491,12 +1495,62 @@ textarea {
   gap: var(--space-2);
 }
 
+/* 缩略图整块是个按钮：点哪儿都能进灯箱，键盘也能聚焦。 */
+.cardpreview__frame {
+  position: relative;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: zoom-in;
+  font: inherit;
+  color: inherit;
+  transition: transform var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
+}
+
+.cardpreview__frame:hover {
+  transform: translateY(-2px);
+}
+
+.cardpreview__frame:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
 .cardpreview img {
   width: 100%;
   height: auto;
   display: block;
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-2);
+}
+
+/* 右下角的「点击放大」浮标，默认半透明，悬停时才完全显形。 */
+.cardpreview__zoom {
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 5px 10px;
+  border-radius: var(--radius-pill);
+  background: rgba(8, 10, 20, 0.62);
+  color: rgba(255, 255, 255, 0.94);
+  font-size: var(--step--2);
+  letter-spacing: 0.02em;
+  opacity: 0.72;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  transition: opacity var(--dur-2) var(--ease-out);
+}
+
+.cardpreview__frame:hover .cardpreview__zoom,
+.cardpreview__frame:focus-visible .cardpreview__zoom {
+  opacity: 1;
 }
 
 .rawtext {
@@ -1636,7 +1690,152 @@ textarea {
   word-break: break-word;
 }
 
-/* --- 20. 提示条 ----------------------------------------------------------- */
+/* --- 20. 卡片灯箱 --------------------------------------------------------- */
+/* 灯箱压在抽屉（60）之上、提示条（90）之下，这样操作反馈仍然可见。
+   它自带一套白色 chrome，不跟随主题的文字色，保证四套主题下工具栏都读得清。 */
+.lightbox {
+  --lb-ink: rgba(255, 255, 255, 0.92);
+  --lb-ink-dim: rgba(255, 255, 255, 0.6);
+  --lb-chrome: rgba(255, 255, 255, 0.14);
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  background: var(--lb-bg, rgba(4, 6, 14, 0.92));
+  backdrop-filter: blur(10px);
+  animation: fade var(--dur-2) var(--ease-out);
+}
+
+.lightbox__bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-5);
+  border-bottom: 1px solid var(--lb-chrome);
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.lightbox__text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lightbox__title {
+  margin: 0;
+  color: var(--lb-ink);
+  font-size: var(--step-1);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lightbox__hint {
+  margin: 0;
+  color: var(--lb-ink-dim);
+  font-size: var(--step--2);
+}
+
+.lightbox__tools {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.lightbox__level {
+  min-width: 52px;
+  text-align: right;
+  color: var(--lb-ink-dim);
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  font-variant-numeric: tabular-nums;
+}
+
+.lightbox__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--lb-chrome);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--lb-ink);
+  font: inherit;
+  font-size: var(--step--1);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out), border-color var(--dur-1) var(--ease-out);
+}
+
+.lightbox__btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.lightbox__btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 画布负责裁剪与手势；touch-action: none 是为了让 pointer 事件接管触屏拖动。 */
+.lightbox__stage {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  touch-action: none;
+}
+
+.lightbox__stage.is-drag {
+  cursor: grabbing;
+}
+
+/* 图片用 transform 做缩放平移（不触发重排），定位锚在画布中心。
+   max-width: none 是必需的，否则会被全局图片规则压回容器宽度。 */
+.lightbox__img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  max-width: none;
+  max-height: none;
+  transform-origin: center center;
+  user-select: none;
+  -webkit-user-drag: none;
+  will-change: transform;
+}
+
+body.is-lightbox {
+  overflow: hidden;
+}
+
+@media (max-width: 720px) {
+  .lightbox__bar {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .lightbox__tools {
+    align-self: stretch;
+    justify-content: space-between;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lightbox {
+    animation: none;
+  }
+}
+/* --- 21. 提示条 ----------------------------------------------------------- */
 .toasts {
   position: fixed;
   right: var(--space-5);
@@ -1701,7 +1900,7 @@ textarea {
   color: var(--warn);
 }
 
-/* --- 21. 启动失败提示 ----------------------------------------------------- */
+/* --- 22. 启动失败提示 ----------------------------------------------------- */
 .bootfail {
   margin: 12vh auto;
   max-width: 560px;
@@ -1736,7 +1935,7 @@ textarea {
   text-align: left;
 }
 
-/* --- 22. 响应式 ----------------------------------------------------------- */
+/* --- 23. 响应式 ----------------------------------------------------------- */
 @media (max-width: 1080px) {
   .records {
     grid-template-columns: minmax(0, 1fr);

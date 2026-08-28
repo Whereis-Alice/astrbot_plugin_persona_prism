@@ -68,21 +68,21 @@ def test_to_dict_covers_every_field():
 # ---------------------------------------------------------------------------
 
 
-def test_intro_line_announces_planned_rounds():
+def test_intro_line_is_one_short_sentence():
+    """群里只说在做什么。轮数、每轮条数这些参数改由 progress_log 写进日志。"""
     line = scanning.intro_line(_report(), target_name="狐狸", label="人格棱镜")
-    assert "12 轮" in line
-    assert "200 条" in line
-    assert "狐狸" in line
+    assert line == "正在为 狐狸 生成人格棱镜…"
+    assert "轮" not in line
+    assert "\n" not in line
 
 
-def test_intro_line_stays_generic_without_backfill():
+def test_intro_line_does_not_leak_scan_details():
     line = scanning.intro_line(
         _report(supported=False),
         target_name="狐狸",
         label="人格棱镜",
     )
-    assert "轮" not in line
-    assert "正在翻聊天记录" in line
+    assert line == "正在为 狐狸 生成人格棱镜…"
 
 
 def test_intro_line_stays_generic_when_rounds_disabled():
@@ -95,17 +95,17 @@ def test_intro_line_stays_generic_when_rounds_disabled():
 # ---------------------------------------------------------------------------
 
 
-def test_progress_line_reports_numbers():
+def test_progress_line_keeps_only_the_sample_count():
+    """群里那句进度只留一个数字，翻页细节全部下沉到日志。"""
     line = scanning.progress_line(
         _report(attempted=True, pages=8, scanned=1600, added=430),
         target_name="狐狸",
         label="人格棱镜",
         sampled=300,
     )
-    assert "8 页" in line
-    assert "1600 条" in line
-    assert "430 条" in line
-    assert "300 条" in line
+    assert line == "已取到 300 条发言，正在分析…"
+    assert "8 页" not in line
+    assert "1600" not in line
 
 
 def test_progress_line_is_empty_without_backfill():
@@ -128,26 +128,68 @@ def test_progress_line_explains_protocol_rejection():
         sampled=42,
     )
     assert "拒绝" in line
-    assert "unsupported action" in line
     assert "42 条" in line
+    #: 协议端的原始报错属于排查细节，写日志就好，别贴进群里。
+    assert "unsupported action" not in line
 
 
-def test_progress_line_mentions_topup_and_exhausted():
-    line = scanning.progress_line(
+def test_progress_log_spells_out_every_detail():
+    """详细版给后台日志：页数、条数、翻页方式、复查/重挖等都要在。"""
+    detail = scanning.progress_log(
         _report(
             attempted=True,
-            pages=1,
-            scanned=200,
-            added=3,
-            topup_only=True,
+            pages=8,
+            scanned=1600,
+            added=430,
+            cursor_field="id_first",
+            cursor_switched=True,
+            exhausted_recheck="shallow",
+            restarted=True,
             exhausted=True,
         ),
         target_name="狐狸",
         label="人格棱镜",
+        sampled=300,
+    )
+    assert "狐狸" in detail
+    assert "8 页" in detail
+    assert "1600 条" in detail
+    assert "430 条" in detail
+    assert "300 条" in detail
+    assert "切换" in detail
+    assert "复查" in detail
+    assert "重挖" in detail
+    assert "\n" not in detail
+
+
+def test_progress_log_covers_topup_and_blocked():
+    topup = scanning.progress_log(
+        _report(attempted=True, pages=1, scanned=200, added=3, topup_only=True, exhausted=True),
+        target_name="狐狸",
+        label="人格棱镜",
         sampled=90,
     )
-    assert "补拉" in line
-    assert "翻到头" in line
+    assert "补拉最新一页" in topup
+    assert "最早一条" in topup
+    blocked = scanning.progress_log(
+        _report(attempted=True, error="unsupported action"),
+        target_name="",
+        label="人格棱镜",
+        sampled=12,
+    )
+    assert "unsupported action" in blocked
+    assert "TA" in blocked
+
+
+def test_progress_log_notes_when_backfill_never_ran():
+    detail = scanning.progress_log(
+        _report(attempted=False, local_before=300),
+        target_name="狐狸",
+        label="人格棱镜",
+        sampled=300,
+    )
+    assert "未触发回溯" in detail
+    assert "300 条" in detail
 
 
 # ---------------------------------------------------------------------------
@@ -251,3 +293,72 @@ def test_human_since_scales():
     assert scanning.human_since(120) == "2 分钟"
     assert scanning.human_since(7200) == "2 小时"
     assert scanning.human_since(200000) == "2 天"
+
+
+# ---------------------------------------------------------------------------
+# 「已挖到头」标记的复查（v1.1.5）
+# ---------------------------------------------------------------------------
+
+
+def test_should_recheck_returns_empty_when_not_exhausted():
+    assert scanning.should_recheck_exhausted({"exhausted": False, "depth_pages": 1}) == ""
+
+
+def test_should_recheck_flags_shallow_marks():
+    now = 1_700_000_000.0
+    state = {"exhausted": True, "depth_pages": 1, "last_scan": int(now - 600)}
+    assert scanning.should_recheck_exhausted(state, now=now) == "shallow"
+
+
+def test_should_recheck_waits_out_the_shallow_window():
+    now = 1_700_000_000.0
+    state = {"exhausted": True, "depth_pages": 1, "last_scan": int(now - 10)}
+    assert scanning.should_recheck_exhausted(state, now=now) == ""
+
+
+def test_should_recheck_trusts_deep_marks_for_longer():
+    now = 1_700_000_000.0
+    fresh = {"exhausted": True, "depth_pages": 9, "last_scan": int(now - 3600)}
+    assert scanning.should_recheck_exhausted(fresh, now=now) == ""
+    stale = {"exhausted": True, "depth_pages": 9, "last_scan": int(now - 86400)}
+    assert scanning.should_recheck_exhausted(stale, now=now) == "stale"
+
+
+def test_should_recheck_treats_missing_timestamp_as_ancient():
+    #: 老版本写下的记录没有 last_scan，不能因此永远不复查。
+    assert scanning.should_recheck_exhausted({"exhausted": True}) == "shallow"
+    assert scanning.should_recheck_exhausted({"exhausted": True, "depth_pages": 9}) == "stale"
+
+
+def test_should_recheck_survives_garbage_values():
+    state = {"exhausted": True, "depth_pages": "毁灭吧", "last_scan": None}
+    assert scanning.should_recheck_exhausted(state) == "shallow"
+
+
+def test_recheck_reasons_cover_every_return_value():
+    assert set(scanning.RECHECK_REASONS) == {"shallow", "stale"}
+
+
+def test_diagnose_explains_recheck_and_restart():
+    items = scanning.diagnose(
+        _report(attempted=True, pages=2, scanned=400, added=100, restarted=True, exhausted_recheck="shallow"),
+    )
+    joined = " / ".join(items)
+    assert "断点" in joined
+    assert "复查" in joined or "验了一遍" in joined
+
+
+def test_describe_scan_state_warns_about_shallow_exhausted_mark():
+    text = "\n".join(
+        scanning.describe_scan_state(
+            {"exhausted": True, "depth_pages": 1, "last_scan": int(time.time()), "oldest_seq": "123"},
+        ),
+    )
+    assert "断点很浅" in text
+    #: 断点够深就不该再唱衰，免得每个群都挂一句免责声明。
+    deep = "\n".join(
+        scanning.describe_scan_state(
+            {"exhausted": True, "depth_pages": 9, "last_scan": int(time.time()), "oldest_seq": "123"},
+        ),
+    )
+    assert "断点很浅" not in deep

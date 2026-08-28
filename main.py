@@ -34,7 +34,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.1.4"
+PLUGIN_VERSION = "v1.1.5"
 
 #: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
 #: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
@@ -423,9 +423,13 @@ class PersonaPrismStar(Star):
         report.planned_rounds = rounds
         report.page_size = page_size
         state = await self.astore.get_scan_state(platform, group_id)
+        #: 「已挖到头」这个判断本身可能是错的（协议端对不认的游标直接回空页），所以
+        #: 隔一段时间就无视它、重新验证一次。代价是一次空请求，收益是救回被误锁的群。
+        recheck = scanning.should_recheck_exhausted(state)
+        report.exhausted_recheck = recheck
         #: 历史已经挖到最早一条。此时往前翻只会拿到空页，但机器人离线期间的新消息
         #: 被动采集是拿不到的，所以退化成"只补拉最新一页"，且不动断点。
-        topup_only = bool(state.get("exhausted"))
+        topup_only = bool(state.get("exhausted")) and not recheck
         report.topup_only = topup_only
         report.depth_before = _as_int(state.get("depth_pages")) or 0
         cursor = None if topup_only else (
@@ -464,6 +468,14 @@ class PersonaPrismStar(Star):
         prev_ids: set[str] = set()
         #: 上一页的原始消息列表。换翻页方式时要拿它重算一次游标。
         last_page: Any = None
+        #: 允许"丢弃库里的断点、退回最新一页重挖"一次。库里的断点可能是上个协议端
+        #: 留下的、或者对方重装后 seq 全变了，拿它去翻只会一直回空页。
+        restart_allowed = not topup_only
+        #: 当前翻页方式是否已被证明可用 —— 用它派生的游标真的换来过一页新消息。
+        #: 第一页的游标是 None（"最新一页"），任何方式都能成功，所以那不算证明。
+        #: 有了这个区分才能判断空页到底是"方式选错了"还是"真的挖到头了"：
+        #: 方式没被证明过 → 换一种再试；已经靠它翻过好几页了 → 认这个空页。
+        cursor_proven = False
         index = 0
 
         while index < rounds:
@@ -483,8 +495,42 @@ class PersonaPrismStar(Star):
 
             messages = (payload or {}).get("messages") if isinstance(payload, dict) else payload
             if not messages:
-                #: 空页才是"真的没有更早的消息了"。只有确实往前翻过（或本次是从一个
-                #: 已经推进过的断点续挖）才敢写进库，免得刚进群的空群被永久锁定。
+                #: 空页有三种可能，从"最可能是我们的错"往"真的没有了"依次排除：
+                #: 1) 游标字段喂错了 —— 协议端不认这个值，于是回空数组而不是报错；
+                #: 2) 库里的断点已失效（换过协议端 / 群消息被清理）—— 一翻就空；
+                #: 3) 确实翻到了群历史最早一条。
+                #: 早先版本直接跳到第 3 种并把 exhausted 永久写库，一次误判就让这个群
+                #: 从此只补拉最新一页，语料永远停在两百来条。
+                switched = (
+                    _switch(last_page)
+                    if last_page is not None and not cursor_proven
+                    else None
+                )
+                if switched is not None:
+                    logger.info(
+                        "[人格棱镜] 群 %s 用 %s 往前翻回了空页，改用 %s 再试",
+                        group_id,
+                        strategy,
+                        switched[1],
+                    )
+                    cursor, strategy = switched
+                    report.cursor_field = strategy
+                    report.cursor_switched = True
+                    cursor_proven = False
+                    index -= 1  # 试探不算正式一轮，别白扣预算
+                    continue
+                if restart_allowed and cursor is not None and report.pages == 0:
+                    #: 拿库里的断点第一翻就是空页 —— 断点本身不可信，丢掉重来。
+                    logger.info(
+                        "[人格棱镜] 群 %s 的回溯断点已失效，退回最新一页重新往前挖",
+                        group_id,
+                    )
+                    restart_allowed = False
+                    cursor = None
+                    depth = 0
+                    report.restarted = True
+                    index -= 1  # 这一轮不算，别白扣一次预算
+                    continue
                 if not topup_only and (report.pages > 0 or cursor is not None):
                     await self.astore.set_scan_state(platform, group_id, exhausted=True)
                 report.exhausted = True
@@ -505,11 +551,16 @@ class PersonaPrismStar(Star):
                     cursor, strategy = switched
                     report.cursor_field = strategy
                     report.cursor_switched = True
+                    cursor_proven = False
+                    index -= 1  # 同上：换方式重试不占正式轮次
                     continue
                 report.stalled = True
                 break
 
             report.pages += 1
+            if cursor is not None:
+                #: 这一页是拿"我们自己算出来的游标"换来的，说明方式选对了。
+                cursor_proven = True
             if isinstance(messages, (list, tuple)):
                 report.scanned += len(messages)
             rows = collector.parse_history_page(messages)
@@ -552,6 +603,8 @@ class PersonaPrismStar(Star):
                 oldest, strategy = switched
                 report.cursor_field = strategy
                 report.cursor_switched = True
+                #: 换了方式，新游标还没被验证过。
+                cursor_proven = False
             cursor = oldest
             depth += 1
             await self.astore.set_scan_state(
@@ -718,11 +771,27 @@ class PersonaPrismStar(Star):
                 )
 
             bundle, scan = await self._gather(event, platform, group_id, target_id)
+            #: 群里只留短提示，翻页细节全部进后台日志 —— 排查靠 logger，不靠刷屏。
+            logger.info(
+                "[人格棱镜] %s",
+                scanning.progress_log(
+                    scan,
+                    target_name=who,
+                    label=spec.label,
+                    sampled=bundle.stats.sampled,
+                ),
+            )
             logger.debug("[人格棱镜] 采集诊断 %s", scan.to_dict())
             min_messages = self.config.int_of("collect.min_messages")
             if not bundle.enough or bundle.stats.sampled < min_messages:
                 error = "样本不足"
-                #: 只说"发言太少"会让人以为回溯没跑。这里把诊断一并给出。
+                logger.info(
+                    "[人格棱镜] 样本不足（%s 条 < %s 条），完整诊断：%s",
+                    bundle.stats.sampled,
+                    min_messages,
+                    " / ".join(scanning.diagnose(scan)),
+                )
+                #: 只说"发言太少"会让人以为回溯没跑。这里把诊断一并给出（群里只贴前几条）。
                 yield event.plain_result(
                     scanning.shortfall_reply(
                         scan,
@@ -1232,8 +1301,12 @@ class PersonaPrismStar(Star):
 
     @filter.command("棱镜帮助")
     async def cmd_help(self, event: AstrMessageEvent):
-        """列出全部指令与当前渲染状态。"""
-        legacy_on = bool(self.config.get("compat.legacy_commands", True))
+        """列出全部指令与当前渲染状态。
+
+        默认渲染成一张分类速查卡（跟着本群卡片主题走）；渲染链路全挂或
+        behavior.help_card 关掉时自动回落成纯文本，指令内容两者完全一致。
+        """
+        legacy_on = self.config.bool_of("compat.legacy_commands")
         prism_specs: list[PromptSpec] = []
         legacy_specs: list[PromptSpec] = []
         custom_specs: list[PromptSpec] = []
@@ -1244,53 +1317,167 @@ class PersonaPrismStar(Star):
                 legacy_specs.append(spec)
             else:
                 prism_specs.append(spec)
+
+        platform, group_id = self._scope(event)
+        theme = cards.normalize_theme(
+            await self.astore.group_theme(platform, group_id) or self.config.str_of("render.theme"),
+        )
+
+        # 一份数据同时喂给卡片和纯文本，避免两边说的话对不上。
+        groups: list[cards.HelpGroup] = [
+            cards.HelpGroup(
+                name="棱镜系列",
+                desc="结构化信息卡：评分 + 雷达图 + 原话引用",
+                items=[cards.HelpItem(spec.command, spec.label) for spec in prism_specs],
+            ),
+        ]
+        if legacy_on and legacy_specs:
+            legacy_items = [cards.HelpItem(spec.command, spec.label) for spec in legacy_specs]
+            legacy_items += [
+                cards.HelpItem("查看画像", "用纯文本重发最近一次画像结果"),
+                cards.HelpItem("切换人格", "让机器人扮演克隆出的人格", ("管理员",)),
+                cards.HelpItem("恢复人格", "停止扮演，恢复原来的人格", ("管理员",)),
+            ]
+            groups.append(
+                cards.HelpGroup(
+                    name="画像系列",
+                    desc="上游同款长文报告，改用本插件的卡片渲染",
+                    items=legacy_items,
+                ),
+            )
+        if custom_specs:
+            groups.append(
+                cards.HelpGroup(
+                    name="自定义模板",
+                    desc="在 WebUI 的「提示词」里增删改",
+                    items=[cards.HelpItem(spec.command, spec.label) for spec in custom_specs],
+                ),
+            )
+        groups += [
+            cards.HelpGroup(
+                name="查询",
+                desc="不消耗模型额度",
+                items=[
+                    cards.HelpItem("棱镜档案", "重新发送最近一次画像卡片"),
+                    cards.HelpItem("棱镜历史", "列出历史画像摘要"),
+                    cards.HelpItem("棱镜缓存", "查看本群语料积累与回溯进度"),
+                    cards.HelpItem("棱镜统计", "查看全局运行数据"),
+                    cards.HelpItem("棱镜主题", "查看 / 切换本群卡片主题"),
+                    cards.HelpItem("棱镜帮助", "就是本张卡"),
+                ],
+            ),
+            cards.HelpGroup(
+                name="隐私",
+                desc="人人可用，随时可撤",
+                items=[
+                    cards.HelpItem("棱镜隐身", "把自己从画像范围内排除"),
+                    cards.HelpItem("棱镜现身", "撤销隐身"),
+                ],
+            ),
+            cards.HelpGroup(
+                name="管理员",
+                desc="维护语料与名单",
+                items=[
+                    cards.HelpItem("棱镜删除", "删除某人在本群的画像记录"),
+                    cards.HelpItem("棱镜清缓存", "清空本群语料"),
+                    cards.HelpItem("棱镜重扫", "重置历史回溯断点（不删语料）"),
+                    cards.HelpItem("棱镜诊断", "实测协议端认哪种翻页方式"),
+                    cards.HelpItem("棱镜拉黑", "把人加入保护名单"),
+                    cards.HelpItem("棱镜放行", "从保护名单里移除"),
+                ],
+            ),
+        ]
+
+        total = sum(len(group.items) for group in groups)
+        backends = " → ".join(self.renderer.backends())
+        chain = f"{self.config.str_of('render.backend')}（{backends}）"
+
         lines = [
             f"人格棱镜 {PLUGIN_VERSION} · 指令一览",
             "",
             "目标写法通用：@对方 / 回复对方的消息 / 直接跟 QQ 号，都省略就是画自己。",
-            "",
-            "【棱镜系列】结构化信息卡（评分、雷达图、原话引用）",
         ]
-        for spec in prism_specs:
-            lines.append(f"  {spec.command} —— {spec.label}")
-        if legacy_on and legacy_specs:
-            lines += ["", "【画像系列】上游同款长文报告，改用本插件的卡片渲染"]
-            for spec in legacy_specs:
-                lines.append(f"  {spec.command} —— {spec.label}")
-            lines += [
-                "  查看画像 —— 用纯文本重发最近一次画像结果",
-                "  切换人格 / 恢复人格 —— 让机器人扮演/停止扮演克隆出的人格（管理员）",
-            ]
-        if custom_specs:
-            lines += ["", "【自定义模板】在 WebUI 里增删改"]
-            for spec in custom_specs:
-                lines.append(f"  {spec.command} —— {spec.label}")
+        for group in groups:
+            lines += ["", f"【{group.name}】{group.desc}"]
+            for item in group.items:
+                tail = f"（{' '.join(item.aliases)}）" if item.aliases else ""
+                lines.append(f"  {item.command} —— {item.label}{tail}")
         lines += [
             "",
-            "【查询】",
-            "  棱镜档案 —— 重新发送最近一次画像卡片",
-            "  棱镜历史 —— 列出历史画像摘要",
-            "  棱镜缓存 —— 查看本群语料积累情况",
-            "  棱镜统计 —— 查看全局运行数据",
-            "  棱镜主题 —— 查看 / 切换本群卡片主题",
-            "",
-            "【隐私】",
-            "  棱镜隐身 —— 把自己从画像范围内排除",
-            "  棱镜现身 —— 撤销隐身",
-            "",
-            "【管理员】",
-            "  棱镜删除 —— 删除某人在本群的画像记录",
-            "  棱镜清缓存 —— 清空本群语料",
-            "  棱镜重扫 —— 重置历史回溯断点（不删语料），下次画像从头再挖一遍",
-            "  棱镜诊断 —— 实测协议端认哪种翻页方式，语料翻不动时先发这个",
-            "  棱镜拉黑 / 棱镜放行 —— 维护保护名单",
-            "",
-            f"当前渲染链路：{self.config.str_of('render.backend')}"
-            f"（可用后端 {' → '.join(self.renderer.backends())}）",
+            f"当前渲染链路：{chain}",
+            f"本群卡片主题：{cards.theme_label(theme)}",
             "棱镜系列出结构化卡片，画像系列出上游同款长文卡，两者互不影响。",
             "更详细的配置与记录管理请打开 WebUI 的「人格棱镜」页面。",
         ]
-        yield event.plain_result("\n".join(lines))
+        text = "\n".join(lines)
+
+        if not self.config.bool_of("behavior.help_card"):
+            yield event.plain_result(text)
+            return
+
+        card = cards.HelpCard(
+            title="人格棱镜 · 指令速查",
+            kicker=f"PERSONA PRISM {PLUGIN_VERSION}",
+            subtitle=(
+                "群友人格画像插件。目标写法通用：@对方 / 回复对方的消息 / 直接跟 QQ 号，"
+                "都省略就是画自己。"
+            ),
+            groups=groups,
+            stats=[
+                (str(total), "条指令"),
+                (str(len(groups)), "个分类"),
+                (str(len(cards.THEMES)), "套卡片主题"),
+                (cards.theme_label(theme), "本群当前主题"),
+            ],
+            footers=[
+                (
+                    "语料从哪来",
+                    [
+                        "平时聊天被动入库",
+                        "画像时自动回溯群历史",
+                        "「棱镜缓存」查看积累进度",
+                        "翻不动就发「棱镜诊断」",
+                    ],
+                ),
+                (
+                    "隐私与边界",
+                    [
+                        "「棱镜隐身」可随时退出",
+                        "保护名单内的人不参与画像",
+                        "语料按保留天数自动清理",
+                        "结论由 AI 生成，仅供娱乐",
+                    ],
+                ),
+                (
+                    "工作台",
+                    [
+                        f"渲染链路 {chain}",
+                        "「棱镜主题」切换本群主题",
+                        "WebUI「人格棱镜」页管配置",
+                        "记录按群 / 按人分类可查",
+                    ],
+                ),
+            ],
+            note="棱镜系列出结构化卡片，画像系列出上游同款长文卡，两者互不影响。",
+        )
+        ctx = CardContext(
+            title="人格棱镜 · 指令速查",
+            kind_label="指令速查",
+            theme=theme,
+            footer_note=self.config.str_of("render.footer_note"),
+            show_avatar=False,
+        )
+        try:
+            result = await self.renderer.render_help(card, ctx, text, record_key="help")
+        except Exception as exc:  # 帮助指令永远不该因为渲染问题而失败
+            logger.warning("[人格棱镜] 指令速查卡渲染失败，回落纯文本：%s", exc)
+            yield event.plain_result(text)
+            return
+        self._last_backend = result.backend
+        if result.image_path:
+            yield event.image_result(result.image_path)
+        else:
+            yield event.plain_result(result.text or text)
 
     @filter.command("棱镜档案")
     async def cmd_latest(self, event: AstrMessageEvent):

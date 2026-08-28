@@ -216,6 +216,82 @@ def test_auto_theme_follows_system_preference():
 
 
 # ---------------------------------------------------------------------------
+# 卡片灯箱
+# ---------------------------------------------------------------------------
+
+
+def test_lightbox_classes_used_in_js_all_have_css_rules():
+    """JS 里凭空造出来的 class 名如果 CSS 没写，页面就是一堆裸元素。"""
+    used = set(re.findall(r'"(lightbox(?:__[a-z]+)?|cardpreview__[a-z]+)"', APP_JS))
+    assert "lightbox" in used and "lightbox__stage" in used
+    for name in sorted(used):
+        assert "." + name in STYLE_CSS, name
+
+
+def test_lightbox_backdrop_is_themed_for_every_theme():
+    # 灯箱底色不跟随 --scrim（抽屉那层太透），每套主题都要单独给一个。
+    blocks = re.split(r'\[data-theme="', STYLE_CSS)
+    for theme in WEBUI_THEMES:
+        block = next(b for b in blocks if b.startswith(theme + '"'))
+        assert "--lb-bg:" in block, theme
+    assert "var(--lb-bg" in STYLE_CSS
+
+
+def test_lightbox_sits_between_drawer_and_toasts():
+    """层级排错的话，要么被抽屉盖住，要么盖掉提示条。"""
+    zindex = {}
+    for selector in (".scrim", ".drawer", ".lightbox", ".toasts"):
+        match = re.search(
+            re.escape(selector) + r"\s*\{[^}]*?z-index:\s*(\d+)",
+            STYLE_CSS,
+            re.S,
+        )
+        assert match, selector
+        zindex[selector] = int(match.group(1))
+    assert zindex[".scrim"] < zindex[".drawer"] < zindex[".lightbox"] < zindex[".toasts"]
+
+
+def test_lightbox_image_is_not_clamped_by_the_global_image_rule():
+    # 复位层给所有 img 设了 max-width: 100%，不解除的话放大到 100% 以上没有效果。
+    match = re.search(r"\.lightbox__img\s*\{(.*?)\}", STYLE_CSS, re.S)
+    assert match
+    assert "max-width: none" in match.group(1)
+    assert "position: absolute" in match.group(1)
+
+
+def test_lightbox_pans_with_transform_instead_of_scroll():
+    """缩放平移必须走 transform，改 width/left 会在长卡片上掉帧。"""
+    assert "style.transform" in APP_JS
+    assert "touch-action: none" in STYLE_CSS
+    assert "setPointerCapture" in APP_JS
+
+
+def test_lightbox_wheel_listener_is_not_passive():
+    # passive 默认为 true 时 preventDefault 无效，滚轮会连带滚动整个页面。
+    assert "{ passive: false }" in APP_JS
+
+
+def test_escape_closes_the_lightbox_before_the_drawer():
+    """灯箱开着时按 Esc 只应该关灯箱，不能把底下的抽屉一起收掉。"""
+    handler = APP_JS.split('document.addEventListener("keydown"')[1]
+    body = handler.split("});")[0]
+    assert body.index("closeLightbox()") < body.index("closeDrawer()")
+    assert body.index("closeLightbox()") < body.index("toggleThemeMenu(false)")
+
+
+def test_opening_the_lightbox_locks_page_scrolling():
+    assert 'classList.add("is-lightbox")' in APP_JS
+    assert 'classList.remove("is-lightbox")' in APP_JS
+    assert re.search(r"body\.is-lightbox\s*\{[^}]*overflow:\s*hidden", STYLE_CSS, re.S)
+
+
+def test_card_preview_thumbnail_is_a_real_button():
+    """用 div 当按钮就丢了键盘可达性，这里必须是 button 且带 type。"""
+    snippet = APP_JS.split('make("button", "cardpreview__frame")')[1][:400]
+    assert 'frame.type = "button"' in snippet
+    assert "openLightbox(" in snippet
+
+# ---------------------------------------------------------------------------
 # 安全
 # ---------------------------------------------------------------------------
 

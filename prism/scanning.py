@@ -28,6 +28,24 @@ ERROR_BRIEF_MAX = 80
 #: Lucky Lillia Bot 等实现）在 AstrBot 里统一走 aiocqhttp 适配器。
 BACKFILL_PLATFORMS: frozenset[str] = frozenset({"aiocqhttp"})
 
+#: 断点深度低于这个值时，"已挖到群历史尽头"很可能是误判：协议端不认我们喂的游标，
+#: 于是直接回一页空数组，看起来和"真的没有更早的消息"一模一样。
+TRUSTED_DEPTH = 3
+
+#: 复查窗口。浅断点疑点大、复查得勤；深断点大概率是真到头了，隔半天验一次就够。
+#: 复查的代价只是一次会返回空页的请求，但能救回被误锁的群（症状：语料永远停在两百条）。
+RECHECK_SHALLOW_SEC = 300
+RECHECK_DEEP_SEC = 21600
+
+#: 样本不足回复里最多贴几条诊断。全量诊断可能有 5～6 条，贴满等于又刷一屏。
+SHORTFALL_ITEM_MAX = 3
+
+#: should_recheck_exhausted 的返回值 → 给用户看的原因。
+RECHECK_REASONS: dict[str, str] = {
+    "shallow": "断点太浅，「已挖到头」很可能是协议端喂回空页造成的误判",
+    "stale": "距上次判定已久，顺手复查一次有没有更早的历史",
+}
+
 
 def brief_error(exc: object) -> str:
     """把异常压成一行短摘要，避免把 traceback 或整段 JSON 贴进群聊。"""
@@ -43,6 +61,35 @@ def brief_error(exc: object) -> str:
 def supports_backfill(platform: str, group_id: str) -> bool:
     """只有群聊 + 已知的 OneBot 适配器才能主动翻历史。"""
     return bool(group_id) and platform in BACKFILL_PLATFORMS
+
+
+def should_recheck_exhausted(state: dict[str, Any], *, now: float | None = None) -> str:
+    """判断这次要不要无视库里的「已挖到头」标记，重新验证一遍。
+
+    背景：协议端对不认识的游标常常直接回一页空数组，我们无法把它和"真的没有更早
+    的消息"区分开，于是会把 exhausted 写进库。一旦写错，这个群从此只补拉最新一页，
+    语料永远停在两百来条——正是用户遇到的"就一个活跃群采不到"。
+
+    复查的代价只是一次多半会返回空页的请求，所以宁可多试：断点很浅（还没翻过几页
+    就宣布到头）时疑点最大，隔几分钟就复查；断点已经很深时大概率是真到头了，隔半天
+    验一次即可。返回值是原因 key（见 RECHECK_REASONS），空串表示这次不复查。
+    """
+    if not state.get("exhausted"):
+        return ""
+    try:
+        depth = max(0, int(state.get("depth_pages") or 0))
+    except (TypeError, ValueError):
+        depth = 0
+    try:
+        last = int(state.get("last_scan") or 0)
+    except (TypeError, ValueError):
+        last = 0
+    moment = time.time() if now is None else now
+    # last <= 0：老版本留下的记录没写时间戳，当成"很久以前"，直接允许复查。
+    elapsed = float("inf") if last <= 0 else moment - last
+    if depth < TRUSTED_DEPTH:
+        return "shallow" if elapsed >= RECHECK_SHALLOW_SEC else ""
+    return "stale" if elapsed >= RECHECK_DEEP_SEC else ""
 
 
 @dataclass(slots=True)
@@ -84,6 +131,10 @@ class ScanReport:
     cursor_switched: bool = False
     #: 两种游标都试过，协议端依旧原地返回同一批消息 —— 翻页卡住了，不是真的挖到头。
     stalled: bool = False
+    #: 本次无视了库里的"已挖到头"标记，重新验证了一遍（空串表示没有复查）。
+    exhausted_recheck: str = ""
+    #: 库里的断点一翻就是空页（已失效），本次退回最新一页重新往前挖。
+    restarted: bool = False
     #: 本次之前这个群累计已往前翻过的页数（断点深度）。
     depth_before: int = 0
     #: 协议端报错摘要，空串表示没报错。
@@ -118,9 +169,12 @@ class ScanReport:
             "cursor_field": self.cursor_field,
             "cursor_switched": self.cursor_switched,
             "stalled": self.stalled,
+            "exhausted_recheck": self.exhausted_recheck,
+            "restarted": self.restarted,
             "depth_before": self.depth_before,
             "error": self.error,
         }
+
 
 def human_since(seconds: float) -> str:
     """把"距今多久"压成一句中文。"""
@@ -141,31 +195,60 @@ def progress_line(
     label: str,
     sampled: int,
 ) -> str:
-    """回溯之后、送进模型之前的那句带数字的进度提示。
+    """回溯之后、送进模型之前的那句进度提示（群聊里看到的版本）。
 
-    没有发起回溯时返回空串，调用方跳过即可——本地缓存够用的情况下再刷一条
-    "翻了 0 页"纯属噪音。
+    刻意只留一个数字。早先这里把"翻了几页 / 看了多少条 / 新入库多少 / 提取到多少"
+    全塞进群里，两条长句连着刷，比画像本身还占屏。翻页细节改由 progress_log() 写进
+    AstrBot 后台日志，排查时去日志里看。
+
+    没有发起回溯时返回空串，调用方跳过即可——本地缓存够用的情况下再刷一条纯属噪音。
+    """
+    if report.blocked:
+        return f"拉群历史被协议端拒绝，改用本地已存的 {sampled} 条发言分析…"
+    if not report.fetched:
+        return ""
+    return f"已取到 {sampled} 条发言，正在分析…"
+
+
+def progress_log(
+    report: ScanReport,
+    *,
+    target_name: str,
+    label: str,
+    sampled: int,
+) -> str:
+    """progress_line 的详细版，供 logger.info 使用。
+
+    群里只留一句短提示，但排查"到底有没有翻到东西"仍然需要这些数字，所以完整版
+    原封不动搬到日志里。
     """
     who = target_name or "TA"
     if report.blocked:
         return (
-            f"协议端拒绝了拉取群历史（{report.error}），"
-            f"只能用本地已存的 {sampled} 条发言为 {who} 生成{label}…"
+            f"[{label}] {who}：协议端拒绝拉取群历史（{report.error}），"
+            f"退回本地语料 {sampled} 条"
         )
-    if not report.fetched:
-        return ""
-    scope = "补拉了最新一页群历史" if report.topup_only else f"已翻 {report.pages} 页群历史"
-    detail = f"（约 {report.scanned} 条消息，新入库 {report.added} 条）"
+    if not report.attempted:
+        return f"[{label}] {who}：未触发回溯（本地语料 {report.local_before} 条已够用），样本 {sampled} 条"
+    scope = "补拉最新一页" if report.topup_only else f"翻了 {report.pages} 页"
+    parts = [
+        f"[{label}] {who}：{scope}群历史（计划 {report.planned_rounds} 轮 × {report.page_size} 条）",
+        f"看到约 {report.scanned} 条，新入库 {report.added} 条",
+        f"有效发言 {sampled} 条",
+    ]
+    if report.cursor_field:
+        parts.append(f"翻页方式 {history.strategy_label(report.cursor_field)}")
+    if report.cursor_switched:
+        parts.append("中途切换过游标")
+    if report.exhausted_recheck:
+        parts.append(f"复查已挖到头标记（{report.exhausted_recheck}）")
+    if report.restarted:
+        parts.append("库里断点失效，已退回最新一页重挖")
     if report.stalled:
-        tail = "，但协议端的翻页没有继续前进"
-    elif report.exhausted:
-        tail = "，群历史已翻到头"
-    else:
-        tail = ""
-    return (
-        f"{scope}{detail}{tail}，"
-        f"提取到 {who} 的有效发言 {sampled} 条，正在生成{label}…"
-    )
+        parts.append("游标不生效，翻页原地打转")
+    if report.exhausted:
+        parts.append("已到群历史最早一条")
+    return "；".join(parts)
 
 
 def intro_line(
@@ -174,14 +257,13 @@ def intro_line(
     target_name: str,
     label: str,
 ) -> str:
-    """开工前那句提示。支持回溯时把计划轮数写清楚，用户才知道要等多久。"""
+    """开工前那句提示。
+
+    只说在做什么。计划轮数、每轮条数这些参数用户既改不动也不关心，写进日志即可。
+    """
     who = target_name or "TA"
-    if report.supported and report.planned_rounds > 0:
-        return (
-            f"正在为 {who} 生成{label}：最多回溯 {report.planned_rounds} 轮群历史"
-            f"（每轮 {report.page_size} 条），请稍候…"
-        )
-    return f"正在翻聊天记录，为 {who} 生成{label}…"
+    return f"正在为 {who} 生成{label}…"
+
 
 def shortfall_reply(
     report: ScanReport,
@@ -201,7 +283,11 @@ def shortfall_reply(
         f"{who} 的有效发言只有 {sampled} 条，还不够生成{label}（至少需要 {min_messages} 条）。",
         "采集诊断：",
     ]
-    lines.extend(f"  · {item}" for item in diagnose(report))
+    # 诊断条目按"最可能的瓶颈"排过序，群里只贴前几条；完整列表写进后台日志。
+    items = diagnose(report)
+    lines.extend(f"  · {item}" for item in items[:SHORTFALL_ITEM_MAX])
+    if len(items) > SHORTFALL_ITEM_MAX:
+        lines.append(f"  · （另有 {len(items) - SHORTFALL_ITEM_MAX} 条细节已写入后台日志）")
     lines.append("建议：让 TA 多聊几句，或发「棱镜缓存」查看本群语料积累情况。")
     return "\n".join(lines)
 
@@ -267,6 +353,14 @@ def diagnose(report: ScanReport) -> list[str]:
                 f"本群的翻页方式已自动切换成「{history.strategy_label(report.cursor_field)}」"
                 "（原先那种翻不动），这个选择已记下来，之后不会再试错。",
             )
+        if report.restarted:
+            items.append(
+                "库里记的回溯断点已经失效（拿它去翻只回空页），本次已丢弃断点、"
+                "从最新一页重新往前挖。",
+            )
+        if report.exhausted_recheck:
+            reason = RECHECK_REASONS.get(report.exhausted_recheck, "按策略复查")
+            items.append(f"本群此前被标记「已挖到头」，但{reason}，所以本次又验了一遍。")
     if not report.passive_capture:
         items.append("「被动采集」当前是关闭的，新消息不会入库，建议在配置里打开。")
     return items
@@ -286,6 +380,9 @@ def describe_scan_state(state: dict[str, Any], *, now: float | None = None) -> l
         depth = 0
     suffix = f"（已往前翻过 {depth} 页）" if depth else ""
     lines = [f"  历史回溯：{exhausted}{suffix}"]
+    if state.get("exhausted") and depth < TRUSTED_DEPTH:
+        # 只翻了一两页就宣布到头，多半是协议端回了空页导致的误判。告诉用户不用手动重扫。
+        lines.append("  （断点很浅，「到头」可能是协议端回空页造成的误判，下次画像会自动复查）")
     last = 0
     try:
         last = int(state.get("last_scan") or 0)

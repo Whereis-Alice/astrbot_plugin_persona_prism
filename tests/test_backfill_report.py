@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -277,15 +278,49 @@ def test_backfill_without_client_reports_unsupported():
 
 
 def test_backfill_degrades_to_topup_when_history_exhausted():
-    store = FakeStore(state={"oldest_seq": "100", "newest_seq": "500", "exhausted": True})
+    #: 断点够深（≥ TRUSTED_DEPTH）且刚判定过 → 相信「已挖到头」，只补拉最新一页。
+    store = FakeStore(
+        state={
+            "oldest_seq": "100",
+            "newest_seq": "500",
+            "exhausted": True,
+            "depth_pages": 5,
+            "last_scan": int(time.time()),
+        },
+    )
     star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
     event = _event([_page(600, 20), _page(700, 20)])
     report = _run_backfill(star, event)
     assert report.topup_only is True
+    assert report.exhausted_recheck == ""
     assert report.pages == 1
     assert len(event.bot.api.calls) == 1
     #: 补拉不该动断点，否则下次又要从头挖。
     assert store.state_updates == []
+
+
+def test_backfill_rechecks_shallow_exhausted_mark():
+    """浅断点上的「已挖到头」不可信 —— 那正是"就一个活跃群采不到"的成因。"""
+    store = FakeStore(state={"oldest_seq": "100", "newest_seq": "500", "exhausted": True})
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
+    event = _event([_page(600, 20), _page(700, 20)])
+    report = _run_backfill(star, event)
+    assert report.exhausted_recheck == "shallow"
+    #: 复查时不能退化成补拉，要真的往前翻。
+    assert report.topup_only is False
+    assert report.pages == 2
+    assert store.state_updates
+
+
+def test_backfill_trusts_deep_and_fresh_exhausted_mark():
+    store = FakeStore(
+        state={"oldest_seq": "100", "exhausted": True, "depth_pages": 9, "last_scan": int(time.time())},
+    )
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
+    event = _event([_page(600, 20)])
+    report = _run_backfill(star, event)
+    assert report.exhausted_recheck == ""
+    assert report.topup_only is True
 
 
 # ---------------------------------------------------------------------------
@@ -526,3 +561,88 @@ def test_backfill_reports_depth_before_from_state():
     assert report.depth_before == 7
     #: 断点深度要接着累加，而不是每次从 0 重新数。
     assert store.state_updates[-1]["depth_pages"] == 9
+
+
+class SeqBlindApi:
+    """传 message_seq 的值直接回一页空数组（协议端只认 message_id）。
+
+    这就是「ある人」那个群的现场：第 2 页一空，v1.1.4 及以前就把 exhausted 永久
+    写库，此后这个群只补拉最新一页，语料永远停在两百来条。
+    """
+
+    def __init__(self, pages: list[list[dict[str, Any]]]) -> None:
+        self.pages = pages
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_action(self, action: str, **kwargs: Any) -> Any:
+        self.calls.append({"action": action, **kwargs})
+        cursor = int(kwargs.get("message_seq") or 0)
+        if cursor == 0:
+            return {"messages": self.pages[0]}
+        for index, page in enumerate(self.pages):
+            if int(page[0]["message_id"]) == cursor:
+                nxt = index + 1
+                return {"messages": self.pages[nxt] if nxt < len(self.pages) else []}
+        return {"messages": []}
+
+
+def test_backfill_rotates_cursor_field_when_page_comes_back_empty():
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
+    api = SeqBlindApi([_dual_page(300, 20), _dual_page(200, 20), _dual_page(100, 20)])
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    #: 空页不等于挖到头 —— 先把没验过的翻页方式试完。
+    assert report.cursor_switched is True
+    assert report.cursor_field == "id_first"
+    assert report.pages == 3
+    assert report.scanned == 60
+
+
+def test_backfill_does_not_rotate_after_cursor_proved_itself():
+    """反过来：已经靠这个方式翻过几页了，空页就该按"真的到头"处理。"""
+    store = FakeStore()
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
+    event = _event([_page(300, 20), _page(200, 20), _page(100, 20), []])
+    report = _run_backfill(star, event)
+    assert report.cursor_switched is False
+    assert report.cursor_field == "seq_first"
+    assert report.exhausted is True
+    assert report.restarted is False
+    #: 不该在空页之后再多打四次试探请求。
+    assert len(event.bot.api.calls) == 4
+
+
+class StaleCursorApi:
+    """库里存的断点是上个协议端留下的：拿它翻只回空页，从最新一页重挖就正常。"""
+
+    def __init__(self, pages: list[list[dict[str, Any]]], bad_cursor: int) -> None:
+        self.pages = pages
+        self.bad_cursor = bad_cursor
+        self.calls: list[dict[str, Any]] = []
+
+    async def call_action(self, action: str, **kwargs: Any) -> Any:
+        self.calls.append({"action": action, **kwargs})
+        cursor = int(kwargs.get("message_seq") or 0)
+        if cursor == self.bad_cursor:
+            return {"messages": []}
+        if cursor == 0:
+            return {"messages": self.pages[0]}
+        for index, page in enumerate(self.pages):
+            if int(page[0]["message_seq"]) == cursor:
+                nxt = index + 1
+                return {"messages": self.pages[nxt] if nxt < len(self.pages) else []}
+        return {"messages": []}
+
+
+def test_backfill_restarts_when_remembered_cursor_is_dead():
+    store = FakeStore(state={"oldest_seq": "9999", "depth_pages": 4})
+    star = _star(FakeConfig(**{"collect.backfill_rounds": 4, "collect.page_size": 20}), store)
+    api = StaleCursorApi([_page(300, 20), _page(200, 20)], bad_cursor=9999)
+    event = SimpleNamespace(bot=SimpleNamespace(api=api))
+    report = _run_backfill(star, event)
+    assert report.restarted is True
+    assert report.pages == 2
+    #: 重挖是从最新一页开始的，深度要归零重新数。
+    depth_writes = [item["depth_pages"] for item in store.state_updates if item["depth_pages"] >= 0]
+    assert depth_writes == [1, 2]

@@ -21,6 +21,7 @@ import math
 import re
 import shutil
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1292,6 +1293,273 @@ def build_markdown_card_html(
 
 
 # ---------------------------------------------------------------------------
+# 指令速查卡（棱镜帮助）
+# ---------------------------------------------------------------------------
+
+#: 分类配色。刻意挑中等明度的色相：填色配白字在浅色主题（杂志 / 宣纸）上对比够，
+#: 放到深色主题（极光 / 霓虹）里也不会糊掉。分类多于配色数时循环取用。
+HELP_ACCENTS: tuple[str, ...] = (
+    "#3b82f6",
+    "#8b5cf6",
+    "#06b6d4",
+    "#10b981",
+    "#f59e0b",
+    "#ec4899",
+    "#ef4444",
+)
+
+#: 分类里超过这么多条指令就横跨整行、内部再分两列，避免一列拉得又细又长。
+HELP_WIDE_THRESHOLD = 5
+
+_HEX_COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+#: 棱镜 logo：白光进、七色散出。做成内联 SVG 而不是引用图片文件，因为 t2i 是远端
+#: 渲染，拿不到本地路径；内联既不额外增大体积，也保证两条渲染链路画面一致。
+_HELP_LOGO_SVG = (
+    '<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" fill="none">'
+    '<path d="M32 7 L59 53 H5 Z" fill="var(--radar-fill)" stroke="var(--accent)"'
+    ' stroke-width="2.6" stroke-linejoin="round"/>'
+    '<path d="M1 31 H21" stroke="var(--ink-strong)" stroke-width="2.6" stroke-linecap="round"/>'
+    '<path d="M41 30 H63" stroke="#ef4444" stroke-width="2.2" stroke-linecap="round"/>'
+    '<path d="M41 35 H61" stroke="#f59e0b" stroke-width="2.2" stroke-linecap="round"/>'
+    '<path d="M41 40 H59" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/>'
+    '<path d="M41 45 H57" stroke="#06b6d4" stroke-width="2.2" stroke-linecap="round"/>'
+    '<path d="M41 50 H55" stroke="#8b5cf6" stroke-width="2.2" stroke-linecap="round"/>'
+    "</svg>"
+)
+
+_HELP_CSS = """
+.help-hero { display: flex; align-items: center; gap: 22px; }
+.help-logo {
+  width: 92px; height: 92px; flex: 0 0 92px;
+  border-radius: 26px;
+  background: var(--avatar-bg); border: var(--avatar-border);
+  display: flex; align-items: center; justify-content: center;
+}
+.help-logo svg { width: 56px; height: 56px; display: block; }
+.help-hero .who h1 { font-size: 32px; }
+.help-sub { margin-top: 9px; font-size: 13.5px; line-height: 1.65; color: var(--ink-dim); }
+.help-stats { display: flex; gap: 12px; margin-top: 24px; }
+.help-stat {
+  flex: 1; padding: 14px 16px; border-radius: 16px;
+  background: var(--block-bg); border: var(--block-border);
+}
+.help-stat b {
+  display: block; font-family: var(--font-title);
+  font-size: 24px; line-height: 1.1; color: var(--ink-strong);
+}
+.help-stat span { display: block; margin-top: 5px; font-size: 11.5px; letter-spacing: .08em; color: var(--ink-mute); }
+.help-spectrum {
+  display: flex; height: 9px; margin-top: 20px;
+  border-radius: 999px; overflow: hidden; background: var(--bar-bg);
+}
+.help-spectrum i { display: block; height: 100%; min-width: 10px; background: var(--cat); }
+.help-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 11px; }
+.help-legend span { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-mute); }
+.help-legend span::before { content: ""; width: 9px; height: 9px; border-radius: 3px; background: var(--cat); }
+.help-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 26px; align-items: start; }
+.help-cat {
+  padding: 16px 18px 15px; border-radius: 18px;
+  background: var(--block-bg); border: var(--block-border);
+}
+.help-cat.wide { grid-column: 1 / -1; }
+.help-cat.wide .help-cmds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; }
+.help-cat-head { display: flex; align-items: center; gap: 10px; }
+.help-cat-mark {
+  width: 26px; height: 26px; flex: 0 0 26px;
+  border-radius: 9px; background: var(--cat); color: #fff;
+  font-family: var(--font-title); font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+}
+.help-cat-head h3 { flex: 1; font-family: var(--font-title); font-size: 16px; color: var(--ink-strong); }
+.help-cat-head em { font-style: normal; font-size: 11px; color: var(--ink-mute); }
+.help-cat-desc { margin-top: 7px; font-size: 12px; line-height: 1.55; color: var(--ink-mute); }
+.help-cmds { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.help-cmd { display: flex; gap: 9px; }
+.help-cmd .n {
+  flex: 0 0 20px; padding-top: 2px; text-align: right;
+  font-family: var(--font-title); font-size: 11px; color: var(--ink-mute);
+}
+.help-cmd .body { flex: 1; min-width: 0; }
+.help-cmd .c {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  font-size: 14px; font-weight: 600; color: var(--ink-strong);
+}
+.help-cmd .al {
+  font-size: 10.5px; font-weight: 400; padding: 2px 7px; border-radius: 999px;
+  background: var(--chip-bg); color: var(--ink-dim); border: var(--chip-border);
+}
+.help-cmd .d { margin-top: 3px; font-size: 12px; line-height: 1.55; color: var(--ink-dim); }
+.help-foot {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
+  margin-top: 26px; padding-top: 18px; border-top: 1px dashed var(--rule);
+}
+.help-foot h4 { font-family: var(--font-title); font-size: 12px; letter-spacing: .14em; color: var(--accent); margin-bottom: 7px; }
+.help-foot p { font-size: 11.5px; line-height: 1.7; color: var(--ink-mute); }
+.help-note { margin-top: 18px; font-size: 11.5px; line-height: 1.6; color: var(--ink-mute); text-align: right; }
+"""
+
+
+@dataclass(slots=True)
+class HelpItem:
+    """速查卡里的一条指令。"""
+
+    command: str
+    label: str = ""
+    aliases: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
+class HelpGroup:
+    """一个指令分类。"""
+
+    name: str
+    desc: str = ""
+    items: list[HelpItem] = field(default_factory=list)
+    #: 留空表示按顺序从 HELP_ACCENTS 取色。
+    accent: str = ""
+    #: None 表示按条数自动决定要不要横跨整行。
+    wide: bool | None = None
+
+
+@dataclass(slots=True)
+class HelpCard:
+    """棱镜帮助卡片的全部内容。"""
+
+    title: str = "人格棱镜"
+    kicker: str = "PERSONA PRISM · 指令速查"
+    subtitle: str = ""
+    groups: list[HelpGroup] = field(default_factory=list)
+    #: 顶部统计块：(数值, 说明)。
+    stats: list[tuple[str, str]] = field(default_factory=list)
+    #: 底部三栏：(小标题, 若干行)。
+    footers: list[tuple[str, list[str]]] = field(default_factory=list)
+    note: str = ""
+
+
+def _help_accent(group: HelpGroup, index: int) -> str:
+    """分类配色。外部可以指定，但只接受 #RGB / #RRGGBB，避免把任意串拼进 style。"""
+    fallback = HELP_ACCENTS[index % len(HELP_ACCENTS)]
+    candidate = str(group.accent or "").strip()
+    return candidate if _HEX_COLOR_RE.match(candidate) else fallback
+
+
+def _help_widths(groups: Sequence[HelpGroup]) -> list[bool]:
+    """决定每个分类占整行（内部再分两列）还是只占半行。
+
+    分类是两列瀑布式排布的，一个"半行"分类如果左右都没有同伴，就会在右侧留下一大块
+    空白，把卡片无谓地拉长。所以这里先按条数挑出"可以只占半行"的候选，再让相邻候选
+    两两成对；落单的候选升级成整行。显式设置了 HelpGroup.wide 的分类不参与配对，
+    调用方的意图优先。
+    """
+    n = len(groups)
+    #: None 表示"可以窄，但还没定"；True/False 是已经拍死的结果。
+    resolved: list[bool | None] = []
+    for group in groups:
+        if group.wide is not None:
+            resolved.append(bool(group.wide))
+        else:
+            resolved.append(None if len(group.items) <= HELP_WIDE_THRESHOLD else True)
+    index = 0
+    while index < n:
+        if resolved[index] is not None:
+            index += 1
+            continue
+        if index + 1 < n and resolved[index + 1] is None:
+            resolved[index] = False
+            resolved[index + 1] = False
+            index += 2
+            continue
+        # 落单：宁可整行两列，也不要在右边空出半张卡的高度。
+        resolved[index] = True
+        index += 1
+    return [bool(flag) for flag in resolved]
+
+
+def build_help_card_html(card: HelpCard, ctx: CardContext) -> str:
+    """把指令速查渲染成一份自包含 HTML（无 JS、无 Jinja 占位符）。
+
+    与画像卡片共用主题变量，所以「棱镜主题」切到哪套，帮助卡就跟着变。
+    """
+    theme = normalize_theme(ctx.theme)
+    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS + _HELP_CSS
+
+    groups = [group for group in card.groups if group.items]
+    accents = [_help_accent(group, pos) for pos, group in enumerate(groups)]
+
+    stats_html = ""
+    if card.stats:
+        cells = "".join(
+            f'<div class="help-stat"><b>{_esc(value)}</b><span>{_esc(name)}</span></div>'
+            for value, name in card.stats
+        )
+        stats_html = f'<div class="help-stats">{cells}</div>'
+
+    spectrum_html = ""
+    if groups:
+        # 每段宽度按该分类的指令条数分配，一眼看出各玩法的体量。
+        bars = "".join(
+            f'<i style="--cat:{accents[pos]};flex:{len(group.items)} 1 0"></i>'
+            for pos, group in enumerate(groups)
+        )
+        legend = "".join(
+            f'<span style="--cat:{accents[pos]}">{_esc(group.name)} · {len(group.items)}</span>'
+            for pos, group in enumerate(groups)
+        )
+        spectrum_html = (
+            f'<div class="help-spectrum">{bars}</div>'
+            f'<div class="help-legend">{legend}</div>'
+        )
+
+    cats: list[str] = []
+    widths = _help_widths(groups)
+    for pos, group in enumerate(groups):
+        wide = widths[pos]
+        rows: list[str] = []
+        for order, item in enumerate(group.items, start=1):
+            chips = "".join(
+                f'<span class="al">{_esc(alias)}</span>' for alias in item.aliases if alias
+            )
+            desc = f'<div class="d">{_esc(item.label)}</div>' if item.label else ""
+            rows.append(
+                '<div class="help-cmd">'
+                f'<span class="n">{order:02d}</span>'
+                '<div class="body">'
+                f'<div class="c">{_esc(item.command)}{chips}</div>{desc}'
+                "</div></div>",
+            )
+        desc_html = f'<div class="help-cat-desc">{_esc(group.desc)}</div>' if group.desc else ""
+        cats.append(
+            f'<div class="help-cat{" wide" if wide else ""}" style="--cat:{accents[pos]}">'
+            '<div class="help-cat-head">'
+            f'<span class="help-cat-mark">{pos + 1:02d}</span>'
+            f"<h3>{_esc(group.name)}</h3><em>{len(group.items)} 条</em>"
+            f'</div>{desc_html}'
+            f'<div class="help-cmds">{"".join(rows)}</div>'
+            "</div>",
+        )
+    grid_html = f'<div class="help-grid">{"".join(cats)}</div>' if cats else ""
+
+    foot_cells = "".join(
+        "<div><h4>" + _esc(title) + "</h4><p>" + "<br/>".join(_esc(line) for line in lines) + "</p></div>"
+        for title, lines in card.footers
+    )
+    foot_html = f'<div class="help-foot">{foot_cells}</div>' if foot_cells else ""
+    note_html = f'<div class="help-note">{_esc(card.note)}</div>' if card.note else ""
+
+    hero = (
+        '<div class="hero help-hero">'
+        f'<div class="help-logo">{_HELP_LOGO_SVG}</div>'
+        '<div class="who">'
+        f'<div class="kicker">{_esc(card.kicker)}</div>'
+        f"<h1>{_esc(card.title)}</h1>"
+        + (f'<div class="help-sub">{_esc(card.subtitle)}</div>' if card.subtitle else "")
+        + "</div></div>"
+    )
+    inner = f"{hero}{stats_html}{spectrum_html}{grid_html}{foot_html}{note_html}"
+    return _document(ctx, css, inner, badge=theme_label(theme))
+
+# ---------------------------------------------------------------------------
 # 渲染器
 # ---------------------------------------------------------------------------
 
@@ -1559,6 +1827,21 @@ class CardRenderer:
             record_key,
         )
 
+    async def render_help(
+        self,
+        card: HelpCard,
+        ctx: CardContext,
+        text: str,
+        record_key: str = "",
+    ) -> RenderResult:
+        """渲染指令速查卡。text 是纯文本兜底（图片全挂了就发它）。"""
+        return await self._run(
+            lambda scoped: build_help_card_html(card, scoped),
+            str(text or ""),
+            ctx,
+            record_key,
+        )
+
     async def render_markdown(
         self,
         source: str,
@@ -1586,11 +1869,16 @@ __all__ = [
     "FONT_FALLBACK",
     "FONT_MAX_BYTES",
     "FONT_MIME_BY_SUFFIX",
+    "HELP_ACCENTS",
     "THEMES",
     "CardContext",
     "CardRenderer",
+    "HelpCard",
+    "HelpGroup",
+    "HelpItem",
     "RenderResult",
     "build_card_html",
+    "build_help_card_html",
     "build_markdown_card_html",
     "confidence_label",
     "markdown_to_html",
