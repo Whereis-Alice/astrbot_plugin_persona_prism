@@ -629,3 +629,43 @@ def test_async_store_exposes_non_callable_attributes(store: PrismStore) -> None:
 def test_async_store_propagates_missing_attribute(store: PrismStore) -> None:
     with pytest.raises(AttributeError):
         _ = AsyncStore(store).no_such_method
+
+def test_corpus_ts_health_and_repair_fix_millisecond_rows(store):
+    store.add_messages(PLATFORM, GROUP, [_msg("1", ts=1700000000)])
+    #: 模拟协议端给毫秒时间戳的历史行（老版本入库时没有归一化）。
+    store.add_messages(PLATFORM, GROUP, [_msg("2", ts=1700000000123)])
+    store.add_messages(PLATFORM, GROUP, [_msg("3", ts=0)])
+
+    health = store.corpus_ts_health(PLATFORM, GROUP)
+    assert health == {"total": 3, "missing": 1, "future": 1}
+
+    assert store.repair_corpus_ts(PLATFORM, GROUP) == 1
+    assert store.corpus_ts_health(PLATFORM, GROUP)["future"] == 0
+    rows = store.window_rows(PLATFORM, GROUP, 1699999999, 1700000001)
+    assert {row["message_id"] for row in rows} == {"1", "2"}
+
+
+def test_repair_corpus_ts_leaves_other_groups_alone(store):
+    store.add_messages(PLATFORM, GROUP, [_msg("1", ts=1700000000123)])
+    store.add_messages(PLATFORM, "999", [_msg("2", ts=1700000000123)])
+    assert store.repair_corpus_ts(PLATFORM, GROUP) == 1
+    assert store.corpus_ts_health(PLATFORM, "999")["future"] == 1
+
+def test_reopen_repairs_millisecond_ts_from_older_versions(tmp_path):
+    path = tmp_path / "prism.db"
+    db = PrismStore(path)
+    try:
+        db.add_messages(PLATFORM, GROUP, [_msg("1", ts=1700000000)])
+        #: 绕过归一化，直接伪造 v1.2.0 之前入库的毫秒行。
+        with db._lock:
+            db._conn.execute("UPDATE corpus SET ts = 1700000000123")
+            db._conn.commit()
+    finally:
+        db.close()
+
+    again = PrismStore(path)
+    try:
+        assert again.corpus_ts_health(PLATFORM, GROUP)["future"] == 0
+        assert again.window_rows(PLATFORM, GROUP, 1699999999, 1700000001)
+    finally:
+        again.close()

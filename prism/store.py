@@ -211,6 +211,14 @@ class PrismStore:
             self._conn.execute(
                 "UPDATE scan_state SET exhausted = 0, oldest_seq = '', depth_pages = 0",
             )
+        #: v1.2.0 及更早版本直接把协议端给的 time 字段当秒存。个别实现给的是毫秒，
+        #: 这些行的时间戳会落在几万年后，「今天」的窗口永远筛不到它们（表现为恋爱成分
+        #: 恒为 0 句）。启动时顺手把量级明显不对的行折算回秒，只动坏行。
+        for threshold, divisor in self._TS_SCALES:
+            self._conn.execute(
+                f"UPDATE corpus SET ts = ts / {divisor} WHERE ts >= ?",
+                (threshold,),
+            )
 
     # -- 基础设施 -----------------------------------------------------------
     def close(self) -> None:
@@ -545,6 +553,50 @@ class PrismStore:
         )
         total = int(value)
         return None if total < 0 else total
+
+    #: 秒级时间戳到 5138 年才会到 1e11，超过就一定是毫秒/微秒/纳秒。
+    _TS_SCALES = ((10**17, 1_000_000_000), (10**14, 1_000_000), (10**11, 1000))
+
+    def corpus_ts_health(self, platform: str = "", group_id: str = "") -> dict[str, int]:
+        """体检语料时间戳：有多少条是 0（缺失）、多少条明显穿越到未来。
+
+        协议端时间戳单位不统一时，这些行会掉出「今天」的窗口，恋爱成分就会
+        一直显示 0 句 —— 所以要能查出来，也要能修。
+        """
+        where, params = _scope_where(platform, group_id)
+        future = _now() + 86400
+        row = self._query(
+            f"""
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(CASE WHEN ts <= 0 THEN 1 ELSE 0 END), 0) AS missing,
+                   COALESCE(SUM(CASE WHEN ts > ? THEN 1 ELSE 0 END), 0) AS future
+            FROM corpus {where}
+            """,
+            [future, *params],
+        )[0]
+        return {
+            "total": int(row["total"] or 0),
+            "missing": int(row["missing"] or 0),
+            "future": int(row["future"] or 0),
+        }
+
+    def repair_corpus_ts(self, platform: str = "", group_id: str = "") -> int:
+        """把毫秒/微秒/纳秒时间戳就地折算回秒，返回修好的行数。
+
+        从大量级往小量级依次处理，避免纳秒被当成毫秒只除一次。
+        """
+        where, params = _scope_where(platform, group_id)
+        joiner = " AND " if where else " WHERE "
+        fixed = 0
+        with self._lock:
+            for threshold, divisor in self._TS_SCALES:
+                cur = self._conn.execute(
+                    f"UPDATE corpus SET ts = ts / {divisor}{where}{joiner}ts >= ?",
+                    [*params, threshold],
+                )
+                fixed += cur.rowcount or 0
+            self._conn.commit()
+        return fixed
 
     def window_rows(
         self,

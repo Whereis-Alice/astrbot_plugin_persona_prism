@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import re
 import time
 from pathlib import Path
@@ -34,7 +35,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.2.0"
+PLUGIN_VERSION = "v1.2.1"
 
 #: 内置提示词对应的指令（与 prompts/builtin_prompts.yaml 一一对应），
 #: 用于「保留指令」校验与帮助表。前 6 条是本插件的结构化卡片玩法，
@@ -199,6 +200,8 @@ class PersonaPrismStar(Star):
         #: 默认的 dual 写法覆盖所有已知协议端，只有遇到"未知参数直接报错"的严格实现
         #: 才会退到单参数写法，退成功后记在这里，同一进程内不再重复试错。
         self._param_style: dict[str, str] = {}
+        #: 已做过时间戳自愈的「平台:群」，同一进程内不重复扫。
+        self._ts_repaired: set[str] = set()
 
         self._register_dashboard_apis()
         logger.info("[人格棱镜] %s 已加载，数据目录：%s", PLUGIN_VERSION, self.data_dir)
@@ -348,15 +351,28 @@ class PersonaPrismStar(Star):
         平台（Telegram / Discord / 微信…）都能积累语料。
         """
         user_id = str(event.get_sender_id() or "")
-        message_id = str(getattr(event.message_obj, "message_id", "") or "")
-        if not user_id or not message_id:
+        if not user_id:
             return
         segments = event.get_messages() or []
         rich = collector.parse_segments_rich(segments)
         text = rich["text"]
         if not text or self._is_own_command(text):
             return
-        raw_ts = _as_int(getattr(event.message_obj, "timestamp", 0)) or int(time.time())
+        message_id = str(getattr(event.message_obj, "message_id", "") or "")
+        if not message_id:
+            #: 少数协议端的消息事件不带 message_id。语料表拿它当主键，缺了就自己造一个
+            #: 稳定值（同一条消息重复入库仍会被去重），否则这些平台一条都存不下来。
+            digest = hashlib.md5(
+                f"{user_id}|{text}".encode(),
+                usedforsecurity=False,
+            ).hexdigest()[:12]
+            message_id = f"local-{int(time.time())}-{digest}"
+        #: 协议端的时间戳可能是毫秒、可能缺失、也可能明显穿越，一律先做常识校验，
+        #: 否则「今天」这个窗口筛不出这条消息，恋爱成分会永远显示 0 句。
+        raw_ts = collector.sane_epoch(
+            getattr(event.message_obj, "timestamp", 0),
+            now=time.time(),
+        )
         message = CorpusMessage(
             message_id=message_id,
             user_id=user_id,
@@ -1062,6 +1078,60 @@ class PersonaPrismStar(Star):
             start -= 86400
         return time.strftime("%Y-%m-%d", time.localtime(start)), start, start + 86400
 
+    async def _repair_corpus_ts(self, platform: str, group_id: str) -> int:
+        """当日窗口一条都筛不出来时，检查并就地折算异常的语料时间戳。
+
+        个别协议端把消息时间给成毫秒（或字段名不是 time），入库后这些行的时间戳会
+        落在几万年后，「今天」的窗口自然永远是空的 —— 表现就是恋爱成分恒为 0 句，
+        而画像却正常（画像不按时间筛）。这里一个进程只对同一个群自愈一次。
+        """
+        scope = f"{platform}:{group_id}"
+        if scope in self._ts_repaired:
+            return 0
+        self._ts_repaired.add(scope)
+        fixed = 0
+        with contextlib.suppress(Exception):
+            health = await self.astore.corpus_ts_health(platform, group_id)
+            if health.get("future"):
+                fixed = int(await self.astore.repair_corpus_ts(platform, group_id) or 0)
+                logger.warning(
+                    "[人格棱镜] 群 %s 有 %s 条语料时间戳量级异常（疑似毫秒），已折算 %s 条。",
+                    group_id,
+                    health.get("future"),
+                    fixed,
+                )
+            elif health.get("missing"):
+                logger.warning(
+                    "[人格棱镜] 群 %s 有 %s 条语料没有时间戳，协议端可能没下发 time 字段，"
+                    "这些语料不参与按天统计（画像不受影响）。",
+                    group_id,
+                    health.get("missing"),
+                )
+        return fixed
+
+    async def _corpus_shortfall_note(
+        self,
+        platform: str,
+        group_id: str,
+        day_rows: int,
+    ) -> str:
+        """样本不足时给一行短诊断，帮用户区分「真没说话」和「采集没生效」。"""
+        try:
+            stats = await self.astore.corpus_stats(platform, group_id)
+            health = await self.astore.corpus_ts_health(platform, group_id)
+        except Exception:  # 诊断失败不能影响主流程
+            return ""
+        total = int(stats.get("total") or 0)
+        if day_rows:
+            return ""
+        if not total:
+            return "本群还没有语料，先让大家聊几句，或发「棱镜诊断」看采集是否正常。"
+        bad = int(health.get("future") or 0) + int(health.get("missing") or 0)
+        if bad:
+            return f"本群 {total} 条语料里有 {bad} 条时间戳异常，已尝试修正，请再发一次。"
+        newest = _fmt_ts(stats.get("newest")) if stats.get("newest") else "未知"
+        return f"本群今天没采到发言（库里共 {total} 条，最近一条 {newest}）。"
+
     def _love_weights(self) -> love.LoveWeights:
         return love.weights_from_sensitivity(self.config.int_of("love.sensitivity"))
 
@@ -1080,6 +1150,8 @@ class PersonaPrismStar(Star):
         这也是相对上游最实用的差别：装上当天就能出结果。
         """
         rows = await self.astore.window_rows(platform, group_id, start, end)
+        if not rows and await self._repair_corpus_ts(platform, group_id):
+            rows = await self.astore.window_rows(platform, group_id, start, end)
         stats = love.compute_day_inputs(rows, tz_offset=self._tz_offset())
         if self.config.bool_of("love.notice_collect"):
             with contextlib.suppress(Exception):
@@ -1209,10 +1281,14 @@ class PersonaPrismStar(Star):
             )
             if len(mine) < min_messages:
                 error = "样本不足"
-                yield event.plain_result(
+                note = await self._corpus_shortfall_note(platform, group_id, len(rows))
+                text = (
                     f"{who} 今天只说了 {len(mine)} 句，还不够结算恋爱成分"
-                    f"（至少 {min_messages} 句）。多聊几句再来。",
+                    f"（至少 {min_messages} 句）。多聊几句再来。"
                 )
+                if note:
+                    text += "\n" + note
+                yield event.plain_result(text)
                 return
 
             self._sender_cooldown[sender_key] = time.time()
@@ -2094,6 +2170,11 @@ class PersonaPrismStar(Star):
             f"  时间范围：{span or '暂无'}",
         ]
         lines.extend(scanning.describe_scan_state(state))
+        with contextlib.suppress(Exception):
+            health = await self.astore.corpus_ts_health(platform, group_id)
+            bad = int(health.get("future") or 0) + int(health.get("missing") or 0)
+            if bad:
+                lines.append(f"  时间戳异常：{bad} 条（不参与按天统计，会自动尝试修正）")
         yield event.plain_result("\n".join(lines))
 
     @filter.permission_type(filter.PermissionType.ADMIN)

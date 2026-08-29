@@ -274,3 +274,53 @@ def test_build_bundle_scanned_falls_back_to_total():
     rows = [{"message_id": "1", "user_id": "1", "text": "就这一条有效发言", "ts": 1}]
     bundle = collector.build_bundle(rows)
     assert bundle.scanned == 1
+
+# ---------------------------------------------------------------------------
+# 时间戳归一化（协议端单位/字段名不统一）
+# ---------------------------------------------------------------------------
+
+
+def test_to_epoch_seconds_normalizes_units():
+    assert collector.to_epoch_seconds(1700000000) == 1700000000
+    assert collector.to_epoch_seconds(1700000000123) == 1700000000  # 毫秒
+    assert collector.to_epoch_seconds(1700000000123456) == 1700000000  # 微秒
+    assert collector.to_epoch_seconds(1700000000123456789) == 1700000000  # 纳秒
+    assert collector.to_epoch_seconds("1700000000") == 1700000000
+    assert collector.to_epoch_seconds("1700000000.5") == 1700000000
+
+
+def test_to_epoch_seconds_rejects_garbage():
+    for bad in (None, "", "  ", "abc", 0, -5, True, False, {}):
+        assert collector.to_epoch_seconds(bad) == 0
+
+
+def test_pick_epoch_falls_back_to_alias_keys():
+    assert collector.pick_epoch({"time": 0, "msgTime": 1700000000000}) == 1700000000
+    assert collector.pick_epoch({"timestamp": "1700000000"}) == 1700000000
+    assert collector.pick_epoch({"nothing": 1}) == 0
+
+
+def test_sane_epoch_replaces_impossible_stamps():
+    now = 1700000000.0
+    assert collector.sane_epoch(1699999000, now=now) == 1699999000
+    assert collector.sane_epoch(1700000000123, now=now) == 1700000000  # 毫秒折算后可用
+    assert collector.sane_epoch(0, now=now) == 1700000000  # 缺失 -> now
+    assert collector.sane_epoch(4000000000, now=now) == 1700000000  # 穿越未来 -> now
+    assert collector.sane_epoch(1000, now=now) == 1700000000  # 远古 -> now
+
+
+def test_parse_history_page_accepts_millisecond_time():
+    page = [
+        {
+            "message_id": "9",
+            "sender": {"user_id": "1", "nickname": "阿狸"},
+            "message": [{"type": "text", "data": {"text": "在的"}}],
+            "time": 1700000000123,
+        },
+    ]
+    assert collector.parse_history_page(page)[0]["ts"] == 1700000000
+
+
+def test_clean_rows_normalizes_millisecond_ts():
+    rows = [{"message_id": "1", "user_id": "1", "text": "今天天气不错", "ts": 1700000000123}]
+    assert collector.clean_rows(rows)[0].ts == 1700000000

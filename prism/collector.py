@@ -135,6 +135,77 @@ def parse_onebot_segments(segments: Iterable[Any]) -> tuple[str, bool]:
     rich = parse_segments_rich(segments)
     return str(rich["text"]), bool(rich["is_reply"])
 
+#: 协议端给消息时间用的字段名并不统一：标准 OneBot 是 time（秒），但实测有
+#: 实现只给 timestamp / msgTime，或者干脆用毫秒。哪个都得认，否则时间戳会变成
+#: 0 或者一个几万年后的数，「今天」这个窗口就永远筛不出东西来。
+HISTORY_TIME_KEYS = (
+    "time",
+    "timestamp",
+    "msg_time",
+    "msgTime",
+    "send_time",
+    "sendTime",
+    "msgTimestamp",
+    "time_ms",
+    "timeMs",
+)
+
+#: 秒级时间戳到 5138 年才会到 1e11，所以超过这个量级一定是毫秒/微秒/纳秒。
+_MS_THRESHOLD = 10**11
+_US_THRESHOLD = 10**14
+_NS_THRESHOLD = 10**17
+
+
+def to_epoch_seconds(value: Any) -> int:
+    """把各种花样的时间戳统一成「秒」，认不出来就返回 0。
+
+    毫秒 / 微秒 / 纳秒都会按量级折算回秒，字符串和浮点也吃得下。
+    """
+    if isinstance(value, bool) or value in (None, ""):
+        return 0
+    number: float
+    if isinstance(value, (int, float)):
+        number = float(value)
+    else:
+        text = str(value).strip()
+        if not text:
+            return 0
+        try:
+            number = float(text)
+        except ValueError:
+            return 0
+    if number <= 0:
+        return 0
+    if number >= _NS_THRESHOLD:
+        number /= 1_000_000_000
+    elif number >= _US_THRESHOLD:
+        number /= 1_000_000
+    elif number >= _MS_THRESHOLD:
+        number /= 1000
+    return int(number)
+
+
+def pick_epoch(raw: dict[str, Any]) -> int:
+    """从一条协议端原始记录里挑出可用的时间戳（秒）。"""
+    for key in HISTORY_TIME_KEYS:
+        if key in raw:
+            stamp = to_epoch_seconds(raw.get(key))
+            if stamp:
+                return stamp
+    return 0
+
+
+def sane_epoch(value: Any, *, now: float, slack_days: int = 400) -> int:
+    """归一化并做常识校验：明显穿越（未来 / 太久以前）的时间戳一律换成 now。
+
+    只用于「当前这条消息」的被动采集 —— 那种场景下 now 一定是对的。
+    """
+    stamp = to_epoch_seconds(value)
+    slack = max(1, slack_days) * 86400
+    if not stamp or stamp > now + 600 or stamp < now - slack:
+        return int(now)
+    return stamp
+
 def parse_history_page(page: Iterable[Any]) -> list[dict[str, Any]]:
     """把一页 get_group_msg_history 的返回整理成扁平记录。"""
     rows: list[dict[str, Any]] = []
@@ -151,7 +222,7 @@ def parse_history_page(page: Iterable[Any]) -> list[dict[str, Any]]:
             "user_id": str(sender.get("user_id") or raw.get("user_id") or ""),
             "user_name": str(sender.get("card") or sender.get("nickname") or ""),
             "text": str(rich["text"]),
-            "ts": int(raw.get("time") or 0),
+            "ts": pick_epoch(raw),
             "is_reply": bool(rich["is_reply"]),
             "reply_to": str(rich["reply_to"]),
             "images": int(rich["images"]),
@@ -203,7 +274,7 @@ def clean_rows(
                 user_id=str(row.get("user_id") or ""),
                 user_name=str(row.get("user_name") or ""),
                 text=text,
-                ts=int(row.get("ts") or 0),
+                ts=to_epoch_seconds(row.get("ts")),
                 is_reply=bool(row.get("is_reply")),
                 reply_to=str(row.get("reply_to") or ""),
                 images=max(0, int(row.get("images") or 0)),
