@@ -294,9 +294,11 @@ def test_build_settings_marks_enum_fields_as_choice(store, config):
     assert fields["collect.sampling"]["type"] == "choice"
     assert fields["render.theme"]["type"] == "choice"
     theme_values = [choice["value"] for choice in fields["render.theme"]["choices"]]
-    # 5 套真主题 + 自动挡
-    assert len(theme_values) == 6
+    # 6 套真主题 + 自动挡
+    assert len(theme_values) == 7
     assert theme_values[0] == "auto"
+    assert fields["love.theme"]["type"] == "choice"
+    assert [c["value"] for c in fields["love.theme"]["choices"]] == theme_values
     assert fields["privacy.include_profile_fields"]["type"] == "multi"
 
 
@@ -376,10 +378,10 @@ def test_build_prompts_lists_builtin_and_reserved(store):
     library = PromptLibrary()
     data = dashboard.build_prompts(store, library)
     assert data["ok"] is True
-    # 5 条棱镜系列 + 5 条兼容上游的画像系列
-    assert len(data["builtin"]) == 10
+    # 6 条棱镜系列 + 5 条兼容上游的画像系列
+    assert len(data["builtin"]) == 11
     assert data["custom"] == []
-    assert len(data["reserved_commands"]) == 10
+    assert len(data["reserved_commands"]) == 11
     assert data["reserved_commands"] == sorted(data["reserved_commands"])
     assert [item["value"] for item in data["layouts"]] == list(VALID_LAYOUTS)
     assert all(entry.get("layout") in VALID_LAYOUTS for entry in data["builtin"])

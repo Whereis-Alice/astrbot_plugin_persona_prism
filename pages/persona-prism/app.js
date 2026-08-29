@@ -94,6 +94,7 @@ const KIND_FILTERS = [
   { value: "roast", label: "群友锐评" },
   { value: "clone", label: "人格克隆" },
   { value: "match", label: "群友姻缘" },
+  { value: "love", label: "恋爱成分" },
 ];
 
 const state = {
@@ -484,17 +485,44 @@ function meter(label, valueText, ratio) {
 /* ---------------------------------------------------------------- 概览视图 */
 
 function kindLabel(kind) {
-  const hit = KIND_FILTERS.find((item) => item.value === kind);
-  if (hit) {
-    return hit.label;
-  }
   if (state.prompts) {
-    const custom = (state.prompts.custom || []).find((item) => item.key === kind);
-    if (custom) {
-      return custom.label || custom.key;
+    const lists = [state.prompts.builtin || [], state.prompts.custom || []];
+    for (const list of lists) {
+      const hit = list.find((item) => item.key === kind);
+      if (hit) {
+        return hit.label || hit.key;
+      }
     }
   }
-  return kind || "未知";
+  const fallback = KIND_FILTERS.find((item) => item.value === kind);
+  return fallback ? fallback.label : kind || "未知";
+}
+
+/* 类型下拉：优先用后端返回的模板清单，这样新增玩法（含兼容指令）自动出现。 */
+function kindOptions() {
+  const out = [{ value: "", label: "全部类型" }];
+  const seen = new Set([""]);
+  for (const item of state.prompts ? state.prompts.builtin || [] : []) {
+    if (item.key && !seen.has(item.key)) {
+      seen.add(item.key);
+      out.push({ value: item.key, label: item.label || item.key });
+    }
+  }
+  if (out.length === 1) {
+    for (const item of KIND_FILTERS) {
+      if (item.value && !seen.has(item.value)) {
+        seen.add(item.value);
+        out.push(item);
+      }
+    }
+  }
+  for (const item of state.prompts ? state.prompts.custom || [] : []) {
+    if (item.key && !seen.has(item.key)) {
+      seen.add(item.key);
+      out.push({ value: item.key, label: (item.label || item.key) + "（自定义）" });
+    }
+  }
+  return out;
 }
 
 function renderOverview(root) {
@@ -793,14 +821,9 @@ function renderRecords(root) {
 
   const kindSelect = make("select", "select");
   kindSelect.style.width = "auto";
-  for (const option of KIND_FILTERS) {
+  for (const option of kindOptions()) {
     const opt = make("option", "", option.label);
     opt.value = option.value;
-    kindSelect.appendChild(opt);
-  }
-  for (const custom of state.prompts ? state.prompts.custom || [] : []) {
-    const opt = make("option", "", (custom.label || custom.key) + "（自定义）");
-    opt.value = custom.key;
     kindSelect.appendChild(opt);
   }
   kindSelect.value = state.filters.kind;

@@ -206,6 +206,7 @@ def build_user_prompt(
     profile: MemberProfile | None = None,
     profile_fields: list[str] | None = None,
     include_partners: bool = True,
+    extra_facts: str = "",
 ) -> str:
     """拼出送给模型的用户消息。
 
@@ -225,6 +226,11 @@ def build_user_prompt(
     blocks.append(
         "# 客观统计（本地精确计算，请当作事实使用）\n" + bundle.stats.to_prompt_block(),
     )
+
+    extra = (extra_facts or "").strip()
+    if extra:
+        # 玩法专属的既成事实（例如恋爱成分的四维分数）。模型只能引用，不能改。
+        blocks.append("# 已算好的指标（不可改动）\n" + extra)
 
     if include_partners and bundle.partners:
         partners = "、".join(f"{name}({count}次)" for name, count in bundle.partners)

@@ -59,9 +59,9 @@ def _ctx(**kw):
 # ---------------------------------------------------------------------------
 
 
-def test_themes_have_five_entries_with_label_and_desc():
-    assert len(cards.THEMES) == 5
-    assert set(cards.THEMES) == {"aurora", "ink", "neon", "paper", "dossier"}
+def test_themes_have_six_entries_with_label_and_desc():
+    assert len(cards.THEMES) == 6
+    assert set(cards.THEMES) == {"aurora", "ink", "neon", "paper", "dossier", "sakura"}
     for meta in cards.THEMES.values():
         assert meta["label"]
         assert meta["desc"]

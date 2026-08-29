@@ -59,11 +59,36 @@ CREATE TABLE IF NOT EXISTS corpus (
     ts          INTEGER NOT NULL DEFAULT 0,
     text        TEXT NOT NULL DEFAULT '',
     is_reply    INTEGER NOT NULL DEFAULT 0,
+    -- 被回复消息的 message_id（用来反推「谁被回复了」，恋爱成分要用）
+    reply_to    TEXT NOT NULL DEFAULT '',
+    -- 这条消息里的图片数量
+    images      INTEGER NOT NULL DEFAULT 0,
+    -- 这条消息 @ 到的 user_id，逗号分隔
+    at_ids      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (platform, group_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_corpus_user
     ON corpus (platform, group_id, user_id, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_corpus_ts ON corpus (ts);
+
+-- 只能从 notice 事件拿到的互动计数，按「平台+群+人+日」聚合。
+-- 消息类指标（发言数 / 回复 / 艾特 / 图片…）一律从 corpus 现算，不在这里双写。
+CREATE TABLE IF NOT EXISTS interactions (
+    platform          TEXT NOT NULL DEFAULT '',
+    group_id          TEXT NOT NULL DEFAULT '',
+    user_id           TEXT NOT NULL DEFAULT '',
+    day               TEXT NOT NULL DEFAULT '',
+    poke_sent         INTEGER NOT NULL DEFAULT 0,
+    poke_received     INTEGER NOT NULL DEFAULT 0,
+    reaction_sent     INTEGER NOT NULL DEFAULT 0,
+    reaction_received INTEGER NOT NULL DEFAULT 0,
+    recall_count      INTEGER NOT NULL DEFAULT 0,
+    -- 当天最后一次算出的恋爱成分综合分，-1 表示还没算过。只用来做趋势提示。
+    love_total        INTEGER NOT NULL DEFAULT -1,
+    updated_at        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (platform, group_id, user_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_interactions_day ON interactions (day);
 
 CREATE TABLE IF NOT EXISTS groups_meta (
     platform    TEXT NOT NULL DEFAULT '',
@@ -158,6 +183,11 @@ class PrismStore:
             ("cursor_field", "TEXT NOT NULL DEFAULT ''"),
             ("depth_pages", "INTEGER NOT NULL DEFAULT 0"),
         ),
+        "corpus": (
+            ("reply_to", "TEXT NOT NULL DEFAULT ''"),
+            ("images", "INTEGER NOT NULL DEFAULT 0"),
+            ("at_ids", "TEXT NOT NULL DEFAULT ''"),
+        ),
     }
 
     def _migrate(self) -> None:
@@ -216,7 +246,7 @@ class PrismStore:
         group_id: str,
         rows: Sequence[CorpusMessage],
     ) -> int:
-        """幂等写入语料。message_id 冲突时只刷新用户名。"""
+        """幂等写入语料。message_id 冲突时刷新用户名，并给老语料补齐新增列。"""
         if not rows:
             return 0
         payload = [
@@ -229,6 +259,9 @@ class PrismStore:
                 msg.ts,
                 msg.text,
                 1 if msg.is_reply else 0,
+                msg.reply_to,
+                max(0, int(msg.images or 0)),
+                msg.at_ids,
             )
             for msg in rows
             if msg.message_id and msg.user_id
@@ -240,12 +273,23 @@ class PrismStore:
             self._conn.executemany(
                 """
                 INSERT INTO corpus
-                    (platform, group_id, user_id, user_name, message_id, ts, text, is_reply)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (platform, group_id, user_id, user_name, message_id, ts, text,
+                     is_reply, reply_to, images, at_ids)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(platform, group_id, message_id) DO UPDATE SET
                     user_name = CASE
                         WHEN excluded.user_name != '' THEN excluded.user_name
                         ELSE corpus.user_name
+                    END,
+                    -- 老版本入库的语料没有这三列，重新扫到时顺手补上
+                    reply_to = CASE
+                        WHEN excluded.reply_to != '' THEN excluded.reply_to
+                        ELSE corpus.reply_to
+                    END,
+                    images = MAX(corpus.images, excluded.images),
+                    at_ids = CASE
+                        WHEN excluded.at_ids != '' THEN excluded.at_ids
+                        ELSE corpus.at_ids
                     END
                 """,
                 payload,
@@ -263,7 +307,7 @@ class PrismStore:
     ) -> list[dict[str, Any]]:
         rows = self._query(
             """
-            SELECT message_id, user_id, user_name, text, ts, is_reply
+            SELECT message_id, user_id, user_name, text, ts, is_reply, reply_to, images, at_ids
             FROM corpus
             WHERE platform = ? AND group_id = ? AND user_id = ?
             ORDER BY ts DESC
@@ -279,6 +323,9 @@ class PrismStore:
                 "text": row["text"],
                 "ts": row["ts"],
                 "is_reply": bool(row["is_reply"]),
+                "reply_to": row["reply_to"],
+                "images": int(row["images"] or 0),
+                "at_ids": row["at_ids"],
             }
             for row in reversed(rows)
         ]
@@ -301,6 +348,22 @@ class PrismStore:
             "oldest": int(row["oldest"] or 0),
             "newest": int(row["newest"] or 0),
         }
+
+    def message_owner(self, platform: str, group_id: str, message_id: str) -> str:
+        """按消息 ID 反查作者。
+
+        上游为此单独维护了一张 message_owner_index 表，从不清理，会无限膨胀；
+        语料库本身就存了 message_id，直接查即可，也跟着语料的保留策略一起过期。
+        """
+        if not message_id:
+            return ""
+        return str(
+            self._scalar(
+                "SELECT user_id FROM corpus WHERE platform = ? AND group_id = ? AND message_id = ?",
+                (platform, group_id, str(message_id)),
+                "",
+            ),
+        )
 
     def latest_user_name(self, platform: str, group_id: str, user_id: str) -> str:
         return str(
@@ -362,6 +425,10 @@ class PrismStore:
                 "DELETE FROM corpus WHERE platform = ? AND group_id = ? AND user_id = ?",
                 (platform, group_id, user_id),
             )
+            self._conn.execute(
+                "DELETE FROM interactions WHERE platform = ? AND group_id = ? AND user_id = ?",
+                (platform, group_id, user_id),
+            )
             self._conn.commit()
         return cur.rowcount or 0
 
@@ -375,9 +442,153 @@ class PrismStore:
                 "DELETE FROM scan_state WHERE platform = ? AND group_id = ?",
                 (platform, group_id),
             )
+            self._conn.execute(
+                "DELETE FROM interactions WHERE platform = ? AND group_id = ?",
+                (platform, group_id),
+            )
             self._conn.commit()
         return cur.rowcount or 0
 
+    # ==================================================================
+    # 互动计数（恋爱成分用）
+    # ==================================================================
+    #: 允许累加的计数列。白名单挡住 SQL 拼接风险。
+    INTERACTION_FIELDS: ClassVar[tuple[str, ...]] = (
+        "poke_sent",
+        "poke_received",
+        "reaction_sent",
+        "reaction_received",
+        "recall_count",
+    )
+
+    def bump_interaction(
+        self,
+        platform: str,
+        group_id: str,
+        user_id: str,
+        day: str,
+        field: str,
+        delta: int = 1,
+    ) -> None:
+        """给某人某天的互动计数加数。字段名必须在白名单里。"""
+        if not (group_id and user_id and day) or delta == 0:
+            return
+        if field not in self.INTERACTION_FIELDS:
+            msg = f"unknown interaction field: {field}"
+            raise ValueError(msg)
+        self._write([
+            (
+                f"""
+                INSERT INTO interactions (platform, group_id, user_id, day, {field}, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, group_id, user_id, day) DO UPDATE SET
+                    {field} = interactions.{field} + excluded.{field},
+                    updated_at = excluded.updated_at
+                """,
+                (platform, group_id, user_id, day, int(delta), _now()),
+            ),
+        ])
+
+    def interaction_counts(
+        self,
+        platform: str,
+        group_id: str,
+        day: str,
+    ) -> dict[str, dict[str, int]]:
+        """取本群某天所有人的互动计数。"""
+        rows = self._query(
+            """
+            SELECT user_id, poke_sent, poke_received, reaction_sent,
+                   reaction_received, recall_count
+            FROM interactions
+            WHERE platform = ? AND group_id = ? AND day = ?
+            """,
+            (platform, group_id, day),
+        )
+        return {
+            str(row["user_id"]): {name: int(row[name] or 0) for name in self.INTERACTION_FIELDS}
+            for row in rows
+        }
+
+    def set_love_total(
+        self,
+        platform: str,
+        group_id: str,
+        user_id: str,
+        day: str,
+        total: int,
+    ) -> None:
+        """记下当天算出的综合分，明天用来做趋势提示。"""
+        if not (group_id and user_id and day):
+            return
+        self._write([
+            (
+                """
+                INSERT INTO interactions (platform, group_id, user_id, day, love_total, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(platform, group_id, user_id, day) DO UPDATE SET
+                    love_total = excluded.love_total,
+                    updated_at = excluded.updated_at
+                """,
+                (platform, group_id, user_id, day, int(total), _now()),
+            ),
+        ])
+
+    def love_total(self, platform: str, group_id: str, user_id: str, day: str) -> int | None:
+        value = self._scalar(
+            """
+            SELECT love_total FROM interactions
+            WHERE platform = ? AND group_id = ? AND user_id = ? AND day = ?
+            """,
+            (platform, group_id, user_id, day),
+            -1,
+        )
+        total = int(value)
+        return None if total < 0 else total
+
+    def window_rows(
+        self,
+        platform: str,
+        group_id: str,
+        start_ts: int,
+        end_ts: int,
+        limit: int = 20000,
+    ) -> list[dict[str, Any]]:
+        """取一个时间窗内本群的全部语料，供恋爱成分现算。"""
+        rows = self._query(
+            """
+            SELECT message_id, user_id, user_name, text, ts, is_reply, reply_to, images, at_ids
+            FROM corpus
+            WHERE platform = ? AND group_id = ? AND ts >= ? AND ts < ?
+            ORDER BY ts ASC
+            LIMIT ?
+            """,
+            (platform, group_id, int(start_ts), int(end_ts), max(1, limit)),
+        )
+        return [
+            {
+                "message_id": row["message_id"],
+                "user_id": row["user_id"],
+                "user_name": row["user_name"],
+                "text": row["text"],
+                "ts": int(row["ts"] or 0),
+                "is_reply": bool(row["is_reply"]),
+                "reply_to": row["reply_to"],
+                "images": int(row["images"] or 0),
+                "at_ids": row["at_ids"],
+            }
+            for row in rows
+        ]
+
+    def prune_interactions(self, *, retention_days: int = 30) -> int:
+        """按天清理互动计数。"""
+        if retention_days <= 0:
+            return 0
+        cutoff = time.strftime("%Y-%m-%d", time.localtime(_now() - retention_days * 86400))
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM interactions WHERE day < ?", (cutoff,))
+            self._conn.commit()
+        return cur.rowcount or 0
     # ==================================================================
     # 群元信息 / 主题
     # ==================================================================
@@ -891,6 +1102,16 @@ class PrismStore:
                 (platform, group_id, user_id),
             ),
         )
+
+    def opted_out_ids(self, platform: str, group_id: str) -> list[str]:
+        """本群所有退出统计的人。榜单类玩法要整体排除他们。"""
+        return [
+            str(row["user_id"])
+            for row in self._query(
+                "SELECT user_id FROM optouts WHERE platform = ? AND group_id = ?",
+                (platform, group_id),
+            )
+        ]
 
     def list_optouts(self) -> list[dict[str, Any]]:
         return [

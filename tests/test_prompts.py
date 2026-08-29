@@ -25,6 +25,7 @@ EXPECTED_BUILTIN = {
     "roast": ("棱镜锐评", "群友锐评", True, "card"),
     "clone": ("棱镜克隆", "人格克隆", False, "text"),
     "match": ("棱镜姻缘", "群友姻缘", True, "card"),
+    "love": ("棱镜恋爱", "恋爱成分", True, "card"),
     # 「画像」系列：兼容上游 astrbot_plugin_portrayal 的长文玩法
     "legacy_portrait": ("画像", "画像·综合", False, "markdown"),
     "legacy_positive": ("正画像", "画像·优势", False, "markdown"),

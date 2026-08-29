@@ -26,6 +26,9 @@ class CorpusMessage:
     ts: int = 0
     is_reply: bool = False
     repeat: int = 1
+    reply_to: str = ""
+    images: int = 0
+    at_ids: str = ""
 
     def as_line(self, index: int | None = None) -> str:
         """渲染成喂给模型的一行语料。"""

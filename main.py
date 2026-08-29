@@ -25,7 +25,7 @@ from astrbot.core.star import StarTools
 from astrbot.core.star.filter.event_message_type import EventMessageType
 from quart import jsonify, request
 
-from .prism import cards, collector, dashboard, history, scanning
+from .prism import cards, collector, dashboard, history, love, scanning
 from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
 from .prism.config import ConfigError, PrismConfig
@@ -34,16 +34,19 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.1.7"
+PLUGIN_VERSION = "v1.2.0"
 
-#: 内置提示词对应的指令，用于「保留指令」校验与帮助表。
-#: 前 5 条是本插件的结构化卡片玩法，后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
+#: 内置提示词对应的指令（与 prompts/builtin_prompts.yaml 一一对应），
+#: 用于「保留指令」校验与帮助表。前 6 条是本插件的结构化卡片玩法，
+#: 后 5 条兼容上游 astrbot_plugin_portrayal 的长文玩法。
+#: 「今日人设」是「棱镜恋爱」的兼容别名，共用同一条提示词，所以只列在 OWN_COMMANDS 里。
 BUILTIN_COMMANDS = (
     "棱镜画像",
     "棱镜赞赏",
     "棱镜锐评",
     "棱镜克隆",
     "棱镜姻缘",
+    "棱镜恋爱",
     "画像",
     "正画像",
     "负画像",
@@ -58,6 +61,8 @@ OWN_COMMANDS = (
     "棱镜锐评",
     "棱镜克隆",
     "棱镜姻缘",
+    "棱镜恋爱",
+    "棱镜恋爱榜",
     "棱镜帮助",
     "棱镜档案",
     "棱镜历史",
@@ -80,6 +85,7 @@ OWN_COMMANDS = (
     "查看画像",
     "切换人格",
     "恢复人格",
+    "今日人设",
 )
 
 #: 「画像」系列（兼容上游）用到的提示词 key。
@@ -230,6 +236,11 @@ class PersonaPrismStar(Star):
                 logger.debug("[人格棱镜] 语料清理完成，移除 %s 条。", removed)
         except Exception as exc:
             logger.warning("[人格棱镜] 语料清理失败：%s", exc)
+        try:
+            #: 互动计数只用于「今天/昨天」的恋爱成分，留 30 天足够做趋势。
+            await self.astore.prune_interactions(retention_days=30)
+        except Exception as exc:
+            logger.warning("[人格棱镜] 互动计数清理失败：%s", exc)
 
     # ---------------------------------------------------------------- 目标解析
 
@@ -341,7 +352,8 @@ class PersonaPrismStar(Star):
         if not user_id or not message_id:
             return
         segments = event.get_messages() or []
-        text, is_reply = collector.parse_onebot_segments(segments)
+        rich = collector.parse_segments_rich(segments)
+        text = rich["text"]
         if not text or self._is_own_command(text):
             return
         raw_ts = _as_int(getattr(event.message_obj, "timestamp", 0)) or int(time.time())
@@ -351,7 +363,10 @@ class PersonaPrismStar(Star):
             user_name=event.get_sender_name() or "",
             text=text,
             ts=raw_ts,
-            is_reply=is_reply,
+            is_reply=rich["is_reply"],
+            reply_to=rich["reply_to"],
+            images=rich["images"],
+            at_ids=rich["at_ids"],
         )
         cleaned = collector.clean_rows(
             [
@@ -362,6 +377,9 @@ class PersonaPrismStar(Star):
                     "text": message.text,
                     "ts": message.ts,
                     "is_reply": message.is_reply,
+                    "reply_to": message.reply_to,
+                    "images": message.images,
+                    "at_ids": message.at_ids,
                 },
             ],
             min_chars=self.config.int_of("collect.min_chars"),
@@ -373,6 +391,44 @@ class PersonaPrismStar(Star):
             return
         with contextlib.suppress(Exception):
             await self.astore.add_messages(platform, group_id, cleaned)
+
+
+    async def _capture_notice(self, platform: str, group_id: str, raw: dict[str, Any]) -> None:
+        """把戳一戳 / 表情回应 / 撤回记进当天的互动计数。
+
+        协议端不下发这些通知时整段静默跳过，恋爱成分会自动退化成「只看聊天记录里的
+        回复与 @」，功能不会因此报错。
+        """
+        if not self.config.bool_of("love.enabled") or not self.config.bool_of("love.notice_collect"):
+            return
+        event_info = love.parse_notice(raw)
+        if not event_info:
+            return
+        day, _start, _end = self._love_day()
+        kind = str(event_info["kind"])
+        actor = str(event_info["actor"])
+        target = str(event_info["target"])
+        count = int(event_info["count"])
+        try:
+            if kind == "recall":
+                await self.astore.bump_interaction(
+                    platform, group_id, actor, day, "recall_count", count,
+                )
+                return
+            if not target and event_info["message_id"]:
+                target = await self.astore.message_owner(
+                    platform,
+                    group_id,
+                    str(event_info["message_id"]),
+                )
+            sent_field, received_field = love.NOTICE_FIELDS[kind]
+            await self.astore.bump_interaction(platform, group_id, actor, day, sent_field, count)
+            if target and target != actor:
+                await self.astore.bump_interaction(
+                    platform, group_id, target, day, received_field, count,
+                )
+        except Exception as exc:
+            logger.debug("[人格棱镜] 互动通知记账失败（%s）：%s", kind, exc)
 
     async def _fetch_history_page(
         self,
@@ -979,6 +1035,383 @@ class PersonaPrismStar(Star):
                     elapsed_ms=int((time.perf_counter() - started) * 1000),
                 )
 
+    # -------------------------------------------------------------- 恋爱成分
+
+    @staticmethod
+    def _tz_offset() -> int:
+        """本机时区相对 UTC 的小时数。用于判定「深夜发言」。"""
+        with contextlib.suppress(Exception):
+            local = time.localtime()
+            seconds = time.altzone if (time.daylight and local.tm_isdst) else time.timezone
+            return int(-seconds // 3600)
+        return 8
+
+    def _love_day(self, ts: float | None = None) -> tuple[str, int, int]:
+        """按 love.day_start_hour 切「一天」，返回 (日期串, 窗口起点, 窗口终点)。
+
+        默认 4 点换日：凌晨三点的发言算前一天，熬夜党不会被切成两半。
+        """
+        start_hour = max(0, min(12, self.config.int_of("love.day_start_hour")))
+        now = int(ts if ts is not None else time.time())
+        local = time.localtime(now)
+        midnight = int(
+            time.mktime((local.tm_year, local.tm_mon, local.tm_mday, 0, 0, 0, 0, 0, -1)),
+        )
+        start = midnight + start_hour * 3600
+        if now < start:
+            start -= 86400
+        return time.strftime("%Y-%m-%d", time.localtime(start)), start, start + 86400
+
+    def _love_weights(self) -> love.LoveWeights:
+        return love.weights_from_sensitivity(self.config.int_of("love.sensitivity"))
+
+    async def _love_day_stats(
+        self,
+        platform: str,
+        group_id: str,
+        *,
+        day: str,
+        start: int,
+        end: int,
+    ) -> tuple[dict[str, love.LoveInputs], list[dict[str, Any]]]:
+        """算出本群这一天每个人的行为计数，并带回原始语料行。
+
+        计数是从语料库现算的，不依赖「插件装上之后才开始攒」的独立日表 ——
+        这也是相对上游最实用的差别：装上当天就能出结果。
+        """
+        rows = await self.astore.window_rows(platform, group_id, start, end)
+        stats = love.compute_day_inputs(rows, tz_offset=self._tz_offset())
+        if self.config.bool_of("love.notice_collect"):
+            with contextlib.suppress(Exception):
+                extra = await self.astore.interaction_counts(platform, group_id, day)
+                for uid, counts in extra.items():
+                    bonus = love.LoveInputs(**counts)
+                    base = stats.get(uid)
+                    stats[uid] = base.merge(bonus) if base else bonus
+        return stats, rows
+
+    async def _love_metrics(
+        self,
+        platform: str,
+        group_id: str,
+        user_id: str,
+        *,
+        day: str,
+        start: int,
+        stats: dict[str, love.LoveInputs],
+    ) -> love.LoveMetrics:
+        yesterday = time.strftime("%Y-%m-%d", time.localtime(start - 86400))
+        previous: int | None = None
+        if self.config.bool_of("love.show_trend"):
+            with contextlib.suppress(Exception):
+                previous = await self.astore.love_total(platform, group_id, user_id, yesterday)
+        return love.compute_metrics(
+            stats.get(user_id) or love.LoveInputs(),
+            weights=self._love_weights(),
+            yesterday_total=previous,
+        )
+
+    async def _love_flow(self, event: AstrMessageEvent):
+        """恋爱成分卡的完整链路。与画像共用渲染、落库、限流与隐私开关。"""
+        spec = self.library.get("love")
+        if spec is None:
+            yield event.plain_result("恋爱成分的提示词不存在，请到 WebUI 的「提示词」页检查。")
+            return
+        if not self.config.bool_of("love.enabled"):
+            yield event.plain_result("恋爱成分玩法已在配置里关闭。")
+            return
+
+        platform, group_id = self._scope(event)
+        if not group_id:
+            yield event.plain_result("恋爱成分统计的是群里的互动，私聊没得算。")
+            return
+        if not self.config.group_allowed(group_id):
+            return
+
+        sender_id = str(event.get_sender_id() or "")
+        target_id, target_hint = await self._resolve_target(event, spec.command)
+        if not target_id:
+            yield event.plain_result("没认出要算谁，@一下对方或者跟上 QQ 号。")
+            return
+
+        is_admin = bool(event.is_admin())
+        if self.config.bool_of("behavior.allow_self_only") and target_id != sender_id and not is_admin:
+            yield event.plain_result("当前配置只允许算自己的恋爱成分。")
+            return
+        if self.config.is_protected(target_id) and not is_admin:
+            yield event.plain_result("对方在保护名单里，不参与这个玩法。")
+            return
+        if self.config.bool_of("privacy.allow_opt_out") and await self.astore.is_opted_out(
+            platform,
+            group_id,
+            target_id,
+        ):
+            yield event.plain_result("对方已用「棱镜隐身」退出统计，尊重一下。")
+            return
+
+        sender_key = f"{platform}:{group_id}:{sender_id}"
+        left = self._cooldown_left(
+            self._sender_cooldown,
+            sender_key,
+            self.config.int_of("limits.user_cooldown_sec"),
+        )
+        if left and not is_admin:
+            yield event.plain_result(f"你刚刚才发起过分析，请再等 {left} 秒。")
+            return
+
+        job_key = f"{platform}:{group_id}:{target_id}:love"
+        if job_key in self._inflight:
+            yield event.plain_result("同样的分析正在进行中，稍等一下就好。")
+            return
+
+        day, start, end = self._love_day()
+        min_messages = max(1, self.config.int_of("love.min_messages"))
+        group_name = await self._group_display_name(event, platform, group_id)
+        self._inflight.add(job_key)
+        started = time.perf_counter()
+        ok = False
+        backend = ""
+        error = ""
+        try:
+            who = target_hint or target_id
+            if not self.config.bool_of("behavior.quiet_progress"):
+                yield event.plain_result(f"正在结算 {who} 今天的恋爱成分…")
+
+            stats, rows = await self._love_day_stats(
+                platform,
+                group_id,
+                day=day,
+                start=start,
+                end=end,
+            )
+            mine = [row for row in rows if str(row.get("user_id") or "") == target_id]
+            if len(mine) < min_messages:
+                #: 今天的语料还没进库（刚装上、或一直没触发过回溯）。借画像那条链路补一次，
+                #: 顺带把最新一页群历史拉下来，然后重算。
+                with contextlib.suppress(Exception):
+                    await self._gather(event, platform, group_id, target_id)
+                stats, rows = await self._love_day_stats(
+                    platform,
+                    group_id,
+                    day=day,
+                    start=start,
+                    end=end,
+                )
+                mine = [row for row in rows if str(row.get("user_id") or "") == target_id]
+
+            logger.info(
+                "[人格棱镜] 恋爱成分：%s 于 %s 有效发言 %s 条（本群当日 %s 条 / %s 人）",
+                who,
+                day,
+                len(mine),
+                len(rows),
+                len(stats),
+            )
+            if len(mine) < min_messages:
+                error = "样本不足"
+                yield event.plain_result(
+                    f"{who} 今天只说了 {len(mine)} 句，还不够结算恋爱成分"
+                    f"（至少 {min_messages} 句）。多聊几句再来。",
+                )
+                return
+
+            self._sender_cooldown[sender_key] = time.time()
+            metrics = await self._love_metrics(
+                platform,
+                group_id,
+                target_id,
+                day=day,
+                start=start,
+                stats=stats,
+            )
+
+            profile = await self._fetch_profile(event, group_id, target_id)
+            target_name = target_hint or (profile.display_name if profile else "")
+            if not target_name:
+                target_name = love.collect_names(mine).get(target_id, "") or target_id
+
+            bundle = collector.build_bundle(
+                mine,
+                max_messages=max(20, self.config.int_of("collect.max_messages")),
+                min_chars=self.config.int_of("collect.min_chars"),
+                filter_commands=self.config.bool_of("collect.filter_commands"),
+                drop_urls=self.config.bool_of("collect.strip_urls"),
+                redact=self.config.bool_of("privacy.redact_pii"),
+                fold=self.config.bool_of("collect.fold_repeats"),
+                sampling=self.config.str_of("collect.sampling"),
+                scanned=len(mine),
+                from_cache=True,
+            )
+
+            llm_portrait = None
+            model = ""
+            if self.config.bool_of("love.llm_commentary"):
+                try:
+                    llm_portrait, model = await self.analyzer.analyze(
+                        spec,
+                        bundle,
+                        target_name=target_name,
+                        group_name=group_name,
+                        profile=profile,
+                        umo=event.unified_msg_origin,
+                        extra_facts=love.metrics_prompt_block(metrics, target_name=target_name),
+                    )
+                except AnalyzeError as exc:
+                    #: 判词写不出来不影响分数，退回纯公式文案，别让用户白等。
+                    logger.warning("[人格棱镜] 恋爱判词生成失败，回退公式文案：%s", exc)
+
+            portrait = love.merge_portrait(metrics, llm_portrait, target_name=target_name)
+
+            theme_choice = cards.normalize_theme_choice(self.config.str_of("love.theme"))
+            theme = cards.resolve_theme(
+                theme_choice,
+                portrait,
+                seed=f"{platform}:{group_id}:{target_id}:{day}",
+                avoid=(
+                    await self.astore.recent_themes(platform, group_id, limit=2)
+                    if cards.is_auto_theme(theme_choice)
+                    else ()
+                ),
+            )
+            record = PortraitRecord(
+                platform=platform,
+                umo=event.unified_msg_origin,
+                group_id=group_id,
+                group_name=group_name,
+                user_id=target_id,
+                user_name=target_name,
+                kind="love",
+                kind_label=spec.label,
+                theme=theme,
+                payload=portrait.to_dict(),
+                text=portrait.to_plain_text(spec.label),
+                sample_size=len(mine),
+                corpus_chars=bundle.stats.chars,
+                confidence=portrait.confidence,
+                model=model,
+            )
+            record_id = await self.astore.save_portrait(
+                record,
+                history_limit=self.config.int_of("behavior.history_limit"),
+            )
+
+            ctx = CardContext(
+                title=spec.label,
+                kind_label=f"{spec.label} · {day}",
+                target_name=target_name,
+                target_id=target_id,
+                group_name=group_name,
+                avatar_url=_AVATAR_TEMPLATE.format(uid=target_id) if platform == "aiocqhttp" else "",
+                theme=theme,
+                footer_note=self.config.str_of("render.footer_note"),
+                model=model,
+                sample_size=len(mine),
+                total_corpus=len(rows),
+                span_days=1,
+                show_evidence=self.config.bool_of("render.show_evidence"),
+                show_avatar=self.config.bool_of("render.show_avatar"),
+            )
+            result = await self.renderer.render(portrait, ctx, record_key=f"love_{record_id}")
+            backend = result.backend
+            self._last_backend = result.backend
+            if result.card_file:
+                await self.astore.attach_card(record_id, result.card_file)
+            with contextlib.suppress(Exception):
+                await self.astore.set_love_total(platform, group_id, target_id, day, metrics.total)
+            await self.astore.touch_group(platform, group_id, group_name=group_name)
+            ok = True
+            if result.image_path:
+                yield event.image_result(result.image_path)
+            else:
+                yield event.plain_result(result.text or record.text)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            logger.exception("[人格棱镜] 生成恋爱成分时出错")
+            yield event.plain_result("结算失败了，日志里有详细堆栈。")
+        finally:
+            self._inflight.discard(job_key)
+            with contextlib.suppress(Exception):
+                await self.astore.log_run(
+                    group_id=group_id,
+                    user_id=target_id,
+                    kind="love",
+                    ok=ok,
+                    backend=backend,
+                    error=error[:300],
+                    elapsed_ms=int((time.perf_counter() - started) * 1000),
+                )
+
+    @filter.command("棱镜恋爱")
+    async def cmd_love(self, event: AstrMessageEvent):
+        """结算今天的恋爱成分，输出一张四维卡片。"""
+        async for result in self._love_flow(event):
+            yield result
+
+    @filter.command("今日人设")
+    async def cmd_love_legacy(self, event: AstrMessageEvent):
+        """兼容上游 astrbot_plugin_love_formula 的指令名，走同一条链路。"""
+        if not self.config.bool_of("compat.love_commands"):
+            yield event.plain_result("「今日人设」已在配置里关闭，可以改用「棱镜恋爱」。")
+            return
+        async for result in self._love_flow(event):
+            yield result
+
+    @filter.command("棱镜恋爱榜")
+    async def cmd_love_board(self, event: AstrMessageEvent):
+        """本群今日恋爱成分排行。只算公式，不调模型，所以很快。"""
+        if not self.config.bool_of("love.enabled"):
+            yield event.plain_result("恋爱成分玩法已在配置里关闭。")
+            return
+        platform, group_id = self._scope(event)
+        if not group_id:
+            yield event.plain_result("排行榜只在群里有意义。")
+            return
+        if not self.config.group_allowed(group_id):
+            return
+
+        day, start, end = self._love_day()
+        stats, rows = await self._love_day_stats(
+            platform,
+            group_id,
+            day=day,
+            start=start,
+            end=end,
+        )
+        if not rows:
+            yield event.plain_result(f"本群 {day} 还没有攒到语料，先聊起来再说。")
+            return
+
+        hidden: set[str] = set()
+        if self.config.bool_of("privacy.allow_opt_out"):
+            with contextlib.suppress(Exception):
+                hidden = set(await self.astore.opted_out_ids(platform, group_id))
+        min_messages = max(1, self.config.int_of("love.min_messages"))
+        weights = self._love_weights()
+        names = love.collect_names(rows)
+        ranked = [
+            (uid, love.compute_metrics(item, weights=weights))
+            for uid, item in stats.items()
+            if item.msg_sent >= min_messages
+            and uid not in hidden
+            and not self.config.is_protected(uid)
+        ]
+        if not ranked:
+            yield event.plain_result(
+                f"本群 {day} 还没有人发言够 {min_messages} 句，榜单空着呢。",
+            )
+            return
+        ranked.sort(key=lambda pair: (-pair[1].total, -pair[1].vibe, pair[0]))
+        size = max(3, min(30, self.config.int_of("love.leaderboard_size")))
+        medals = ("🥇", "🥈", "🥉")
+        lines = [f"本群 {day} 恋爱成分榜（{len(ranked)} 人在榜）"]
+        for index, (uid, metrics) in enumerate(ranked[:size]):
+            mark = medals[index] if index < len(medals) else f"{index + 1}."
+            who = names.get(uid, uid)
+            lines.append(
+                f"{mark} {who} {metrics.total} 分 · {metrics.archetype.label}",
+            )
+        lines.append("发「棱镜恋爱」看自己的详细卡片。")
+        yield event.plain_result("\n".join(lines))
     # ------------------------------------------------------------------ 指令
 
     @filter.command("棱镜画像")
@@ -1845,6 +2278,12 @@ class PersonaPrismStar(Star):
         if not group_id:
             return
         allowed = self.config.group_allowed(group_id)
+        raw = getattr(event.message_obj, "raw_message", None)
+        if isinstance(raw, dict) and str(raw.get("post_type") or "") == "notice":
+            #: 戳一戳 / 表情回应 / 撤回都是 notice，不是消息，走单独的计数入口。
+            if allowed:
+                await self._capture_notice(platform, group_id, raw)
+            return
         if allowed and self.config.bool_of("collect.passive_capture"):
             await self._capture(event, platform, group_id)
         await self._maintenance()

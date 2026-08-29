@@ -82,14 +82,18 @@ STOPWORDS: frozenset[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 
-def parse_onebot_segments(segments: Iterable[Any]) -> tuple[str, bool]:
-    """把 OneBot 消息段列表压成一行文本。
+def parse_segments_rich(segments: Iterable[Any]) -> dict[str, Any]:
+    """把 OneBot 消息段列表压成一行文本，并顺手抽出互动信号。
 
-    上游只保留 text 段，@ 和引用直接丢掉。但"这个人爱不爱 @ 别人""是不是
-    总在接话"本身就是重要的性格信号，所以这里保留成可读标记。
+    上游只保留 text 段，@ 和引用直接丢掉。但「这个人爱不爱 @ 别人」「是不是
+    总在接话」本身就是重要的性格信号，所以这里保留成可读标记；被回复的
+    message_id、@ 到的 user_id、图片数量另外单独带出来，恋爱成分要用。
     """
     parts: list[str] = []
     is_reply = False
+    reply_to = ""
+    images = 0
+    at_ids: list[str] = []
     for seg in segments or []:
         if not isinstance(seg, dict):
             continue
@@ -104,16 +108,32 @@ def parse_onebot_segments(segments: Iterable[Any]) -> tuple[str, bool]:
             else:
                 name = str(data.get("name") or "").strip()
                 parts.append(f"@{name or target}")
+                if target and target not in at_ids:
+                    at_ids.append(target)
         elif seg_type == "reply":
             is_reply = True
+            if not reply_to:
+                reply_to = str(data.get("id") or data.get("message_id") or "")
         elif seg_type == "face":
             parts.append("[表情]")
         elif seg_type == "image":
             parts.append("[图片]")
+            images += 1
         elif seg_type in {"record", "video"}:
             parts.append("[语音]" if seg_type == "record" else "[视频]")
-    return " ".join(p for p in parts if p).strip(), is_reply
+    return {
+        "text": " ".join(p for p in parts if p).strip(),
+        "is_reply": is_reply,
+        "reply_to": reply_to,
+        "images": images,
+        "at_ids": ",".join(at_ids),
+    }
 
+
+def parse_onebot_segments(segments: Iterable[Any]) -> tuple[str, bool]:
+    """parse_segments_rich 的老签名包装：只要正文和「是否回复」。"""
+    rich = parse_segments_rich(segments)
+    return str(rich["text"]), bool(rich["is_reply"])
 
 def parse_history_page(page: Iterable[Any]) -> list[dict[str, Any]]:
     """把一页 get_group_msg_history 的返回整理成扁平记录。"""
@@ -125,14 +145,17 @@ def parse_history_page(page: Iterable[Any]) -> list[dict[str, Any]]:
         if message_id in (None, ""):
             continue
         sender = raw.get("sender") or {}
-        text, is_reply = parse_onebot_segments(raw.get("message") or [])
+        rich = parse_segments_rich(raw.get("message") or [])
         row: dict[str, Any] = {
             "message_id": str(message_id),
             "user_id": str(sender.get("user_id") or raw.get("user_id") or ""),
             "user_name": str(sender.get("card") or sender.get("nickname") or ""),
-            "text": text,
+            "text": str(rich["text"]),
             "ts": int(raw.get("time") or 0),
-            "is_reply": is_reply,
+            "is_reply": bool(rich["is_reply"]),
+            "reply_to": str(rich["reply_to"]),
+            "images": int(rich["images"]),
+            "at_ids": str(rich["at_ids"]),
         }
         # 顺手把 message_seq / real_seq 带上：get_group_msg_history 的翻页参数虽然
         # 叫 message_seq，但各协议端认的到底是它还是 message_id 并不统一，两个都留着
@@ -182,6 +205,9 @@ def clean_rows(
                 text=text,
                 ts=int(row.get("ts") or 0),
                 is_reply=bool(row.get("is_reply")),
+                reply_to=str(row.get("reply_to") or ""),
+                images=max(0, int(row.get("images") or 0)),
+                at_ids=str(row.get("at_ids") or ""),
             ),
         )
     result.sort(key=lambda m: (m.ts, m.message_id))

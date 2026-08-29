@@ -170,7 +170,8 @@
           "ink",
           "neon",
           "paper",
-          "dossier"
+          "dossier",
+          "sakura"
         ],
         "labels": [
           "自动挡（按画像性子临场挑一套）",
@@ -178,7 +179,8 @@
           "水墨 Ink（宣纸留白）",
           "霓境 Neon（赛博高对比）",
           "刊物 Paper（杂志排版）",
-          "档案 Dossier（机密档案风）"
+          "档案 Dossier（机密档案风）",
+          "恋色樱粉 Sakura（Y2K 恋爱游戏风）"
         ],
         "hint": "群内可用『棱镜主题 <名字>』临时切换本群主题。选『自动挡』则每张卡按画像的标签、维度分与语气临场挑一套，并会避开本群最近用过的，同一张画像重渲染结果不变。"
       },
@@ -385,6 +387,84 @@
       }
     }
   },
+  "love": {
+    "description": "恋爱成分",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用恋爱成分玩法",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后『棱镜恋爱』『棱镜恋爱榜』『今日人设』都不再响应，也不再统计戳一戳/表情回应/撤回。"
+      },
+      "min_messages": {
+        "description": "最少发言条数",
+        "type": "int",
+        "default": 5,
+        "hint": "当天发言不足这个数就不出卡（范围 1~200）。恋爱成分看的是当天互动，门槛比人格画像低很多。"
+      },
+      "day_start_hour": {
+        "description": "每日结算起点（小时）",
+        "type": "int",
+        "default": 4,
+        "hint": "0~12。默认 4 点，意思是凌晨 3 点的发言算前一天，熬夜党不会被切成两半。"
+      },
+      "sensitivity": {
+        "description": "灵敏度",
+        "type": "int",
+        "default": 50,
+        "hint": "1~100，50 是基线。调高则同样的互动量算出来的分数更夸张（更容易极端），调低则大家的分都趋于中间。"
+      },
+      "llm_commentary": {
+        "description": "让模型写判词",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后四维分数仍由公式算，只有标题、锐评和建议交给模型润色；模型不可用时自动回退纯公式文案。"
+      },
+      "show_trend": {
+        "description": "显示昨日对比",
+        "type": "bool",
+        "default": true,
+        "hint": "卡片上标出恋爱成分相对昨天的涨跌。昨日分只用于展示，不参与今天的计算。"
+      },
+      "leaderboard_size": {
+        "description": "排行榜人数",
+        "type": "int",
+        "default": 10,
+        "hint": "3~30。『棱镜恋爱榜』一次列出多少人。"
+      },
+      "notice_collect": {
+        "description": "统计戳一戳与表情回应",
+        "type": "bool",
+        "default": true,
+        "hint": "监听 OneBot 的 poke / 表情回应 / 撤回通知来补充互动数据。协议端不下发这些通知时自动降级，只用聊天记录里的回复与 @ 计算。"
+      },
+      "theme": {
+        "description": "恋爱卡默认主题",
+        "type": "string",
+        "default": "sakura",
+        "options": [
+          "auto",
+          "aurora",
+          "ink",
+          "neon",
+          "paper",
+          "dossier",
+          "sakura"
+        ],
+        "labels": [
+          "自动挡（按判词临场挑一套）",
+          "极光 Aurora（暗色玻璃拟态）",
+          "水墨 Ink（宣纸留白）",
+          "霓境 Neon（赛博高对比）",
+          "刊物 Paper（杂志排版）",
+          "档案 Dossier（机密档案风）",
+          "恋色樱粉 Sakura（Y2K 恋爱游戏风）"
+        ],
+        "hint": "恋爱卡单独用一套主题，不受『棱镜主题』影响。默认樱粉。"
+      }
+    }
+  },
   "behavior": {
     "description": "交互行为",
     "type": "object",
@@ -430,6 +510,12 @@
         "type": "bool",
         "default": true,
         "hint": "画像 / 正画像 / 负画像 / 克隆人格 / 找对象 / 查看画像 / 切换人格 / 恢复人格。若同时装了上游 astrbot_plugin_portrayal 会指令撞车，建议关掉其中一边。"
+      },
+      "love_commands": {
+        "description": "启用『今日人设』恋爱成分指令",
+        "type": "bool",
+        "default": true,
+        "hint": "只影响兼容别名『今日人设』，本插件自己的『棱镜恋爱』不受影响。若同时装了上游 astrbot_plugin_love_formula 会指令撞车，建议关掉其中一边。"
       }
     }
   }

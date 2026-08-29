@@ -36,6 +36,7 @@ THEMES: dict[str, dict[str, str]] = {
     "neon": {"label": "赛博霓虹", "desc": "暗夜霓虹描边 + 扫描线"},
     "paper": {"label": "杂志排版", "desc": "浅色刊物风，衬线大标题"},
     "dossier": {"label": "机密档案", "desc": "牛皮纸档案袋 + 打字机字体"},
+    "sakura": {"label": "恋色樱粉", "desc": "Y2K 恋爱游戏风，粉紫渐变 + 圆角糖果色"},
 }
 
 DEFAULT_THEME = "aurora"
@@ -75,6 +76,10 @@ THEME_CHOICES: dict[str, dict[str, str]] = {AUTO_THEME: AUTO_THEME_META, **THEME
 #: 自动挡的选题词表。刻意写成「意象词」而不是人格量表术语：
 #: 画像里出现的是形容词和网络口语，不是 OCEAN 五因素的标准表述。
 THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "sakura": (
+        "恋爱", "纯爱", "撒娇", "黏人", "暗恋", "心动", "甜", "娇", "萌", "可爱",
+        "告白", "追人", "倒贴", "下头", "海王", "白月光", "偶像", "人气", "亲密", "浪漫",
+    ),
     "neon": (
         "夜猫", "熬夜", "深夜", "凌晨", "作息颠倒",
         "玩梗", "抽象", "整活", "阴阳", "嘴炮", "话痨", "跳脱", "亢奋", "躁",
@@ -827,6 +832,48 @@ _THEME_CSS: dict[str, str] = {
 .kicker { letter-spacing: .34em; }
 .badge { transform: rotate(6deg); font-weight: 700; }
 .sec h3::before { content: "// "; color: var(--accent); }
+""",
+    "sakura": """
+:root {
+  --page-bg: radial-gradient(1100px 640px at 18% -12%, #ffd9ec 0%, #ffc6e3 38%, #f4a9d6 100%);
+  --radius: 34px;
+  --card-bg: linear-gradient(155deg, rgba(255,255,255,.94) 0%, rgba(255,238,247,.96) 58%, rgba(255,226,242,.97) 100%);
+  --card-border: 2px solid rgba(255,255,255,.9);
+  --card-shadow: 0 34px 80px rgba(196,86,148,.34);
+  --card-veil: radial-gradient(560px 300px at 88% 6%, rgba(255,182,222,.42), transparent 70%),
+               radial-gradient(480px 280px at 4% 94%, rgba(198,182,255,.34), transparent 72%);
+  --ink: #6c3f5c;
+  --ink-strong: #46203b;
+  --ink-dim: #8a5b78;
+  --ink-mute: #a97e97;
+  --accent: #ff5fa2;
+  --accent-soft: rgba(255,95,162,.4);
+  --accent-ink: #e0357f;
+  --rule: rgba(255,140,190,.32);
+  --chip-bg: rgba(255,160,205,.2);
+  --chip-border: 1px solid rgba(255,140,190,.36);
+  --quote-bg: rgba(255,225,240,.72);
+  --block-bg: rgba(255,247,251,.82);
+  --block-border: 1px solid rgba(255,160,205,.3);
+  --bar-bg: rgba(255,170,208,.26);
+  --bar-fill: linear-gradient(90deg, #ff7fb6, #b48bff);
+  --radar-fill: rgba(255,95,162,.2);
+  --avatar-radius: 50%;
+  --avatar-bg: rgba(255,180,215,.28);
+  --avatar-border: 3px solid rgba(255,255,255,.92);
+  --badge-bg: rgba(255,95,162,.14);
+  --badge-ink: #e0357f;
+  --badge-border: 1px solid rgba(255,95,162,.4);
+  --tag-pos-bg: rgba(120,215,180,.2); --tag-pos-ink: #2f8f6c; --tag-pos-line: rgba(120,215,180,.42);
+  --tag-neu-bg: rgba(190,170,255,.22); --tag-neu-ink: #7a5bd0; --tag-neu-line: rgba(190,170,255,.44);
+  --tag-neg-bg: rgba(255,120,160,.2); --tag-neg-ink: #d63a72; --tag-neg-line: rgba(255,120,160,.42);
+  --font-title: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.kicker { letter-spacing: .26em; }
+.badge { font-weight: 700; }
+.sec h3::before { content: "♡ "; color: var(--accent); }
+.tag { font-weight: 600; }
 """,
 }
 

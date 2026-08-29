@@ -75,8 +75,20 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "require_admin": True,
         "clear_history_on_switch": True,
     },
+    "love": {
+        "enabled": True,
+        "min_messages": 5,
+        "day_start_hour": 4,
+        "sensitivity": 50,
+        "llm_commentary": True,
+        "show_trend": True,
+        "leaderboard_size": 10,
+        "notice_collect": True,
+        "theme": "sakura",
+    },
     "compat": {
         "legacy_commands": True,
+        "love_commands": True,
     },
     "behavior": {
         "quiet_progress": False,
@@ -135,10 +147,20 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "persona_clone.require_admin",
         "persona_clone.clear_history_on_switch",
         "compat.legacy_commands",
+        "compat.love_commands",
+        "love.enabled",
+        "love.min_messages",
+        "love.day_start_hour",
+        "love.sensitivity",
+        "love.llm_commentary",
+        "love.show_trend",
+        "love.leaderboard_size",
+        "love.notice_collect",
+        "love.theme",
     },
 )
 
-VALID_THEMES = ("aurora", "ink", "neon", "paper", "dossier")
+VALID_THEMES = ("aurora", "ink", "neon", "paper", "dossier", "sakura")
 #: 配置项 render.theme 还多一个 "auto"（自动挡）：它不是配色，而是「按画像临场挑一套」。
 VALID_THEME_CHOICES = ("auto", *VALID_THEMES)
 VALID_BACKENDS = ("auto", "local_first", "t2i_only", "text_only")
@@ -163,6 +185,7 @@ _ENUMS: dict[str, tuple[str, ...]] = {
     "render.image_format": VALID_IMAGE_FORMATS,
     "collect.sampling": VALID_SAMPLING,
     "collect.cursor_field": VALID_CURSOR_FIELDS,
+    "love.theme": VALID_THEME_CHOICES,
 }
 
 _RANGES: dict[str, tuple[int, int]] = {
@@ -183,6 +206,10 @@ _RANGES: dict[str, tuple[int, int]] = {
     "inject.max_chars": (50, 4000),
     "inject.max_age_days": (1, 3650),
     "behavior.history_limit": (1, 500),
+    "love.min_messages": (1, 200),
+    "love.day_start_hour": (0, 12),
+    "love.sensitivity": (1, 100),
+    "love.leaderboard_size": (3, 30),
 }
 
 

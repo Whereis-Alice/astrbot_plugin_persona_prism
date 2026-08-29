@@ -27,13 +27,13 @@ def test_plugin_identity_is_renamed_everywhere():
 
 
 def test_own_commands_has_no_duplicates():
-    assert len(main.OWN_COMMANDS) == 27
-    assert len(set(main.OWN_COMMANDS)) == 27
+    assert len(main.OWN_COMMANDS) == 30
+    assert len(set(main.OWN_COMMANDS)) == 30
 
 
 def test_builtin_commands_are_a_subset_of_own_commands():
-    # 5 条棱镜系列 + 5 条兼容上游的画像系列
-    assert len(main.BUILTIN_COMMANDS) == 10
+    # 6 条棱镜系列 + 5 条兼容上游的画像系列
+    assert len(main.BUILTIN_COMMANDS) == 11
     assert set(main.BUILTIN_COMMANDS) <= set(main.OWN_COMMANDS)
 
 
@@ -43,8 +43,9 @@ def test_builtin_commands_match_the_prompt_library():
     assert commands == set(main.BUILTIN_COMMANDS)
 
 
-#: 「画像」系列是为兼容上游 astrbot_plugin_portrayal 特意沿用的指令名，不带棱镜前缀。
-COMPAT_COMMANDS = frozenset(main.LEGACY_KEYS) | {"查看画像", "切换人格", "恢复人格"}
+#: 「画像」系列（兼容 astrbot_plugin_portrayal）与「今日人设」（兼容
+#: astrbot_plugin_love_formula）是特意沿用的上游指令名，不带棱镜前缀。
+COMPAT_COMMANDS = frozenset(main.LEGACY_KEYS) | {"查看画像", "切换人格", "恢复人格", "今日人设"}
 
 
 def test_every_command_shares_the_prism_prefix():

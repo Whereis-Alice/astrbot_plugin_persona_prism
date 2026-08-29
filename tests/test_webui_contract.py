@@ -191,6 +191,35 @@ def test_settings_group_icons_exist_as_symbols():
 
 
 # ---------------------------------------------------------------------------
+# 记录类型
+# ---------------------------------------------------------------------------
+
+
+def _kind_filter_values() -> set[str]:
+    block = APP_JS.split("const KIND_FILTERS = [", 1)[1].split("];", 1)[0]
+    return set(re.findall(r'value:\s*"([a-z_]*)"', block))
+
+
+def test_kind_filter_fallback_covers_every_main_playstyle():
+    """prompts 还没加载时用的静态兜底清单，必须覆盖所有主玩法（含恋爱成分）。"""
+    from astrbot_plugin_persona_prism.prism.prompts import PromptLibrary
+
+    builtin = {
+        spec.key
+        for spec in PromptLibrary().all_specs()
+        if spec.builtin and not spec.key.startswith("legacy_")
+    }
+    assert builtin <= _kind_filter_values()
+
+
+def test_kind_dropdown_is_built_from_backend_prompt_list():
+    """兼容指令产生的 legacy_* 记录也要能筛，所以下拉必须走后端模板清单。"""
+    assert "function kindOptions()" in APP_JS
+    assert "state.prompts.builtin" in APP_JS
+    assert "for (const option of kindOptions())" in APP_JS
+
+
+# ---------------------------------------------------------------------------
 # 界面主题
 # ---------------------------------------------------------------------------
 
@@ -328,6 +357,10 @@ def test_pages_do_not_call_third_party_origins():
 # ---------------------------------------------------------------------------
 
 
+#: 两个上游插件的包名。只能出现在致谢/来源说明里，不能变成真实标识符。
+UPSTREAM_WORDS = ("portrayal", "love_formula", "loveformula")
+
+
 def test_no_upstream_identifiers_leak_into_code():
     blobs = {
         "main.py": MAIN_SRC,
@@ -339,7 +372,8 @@ def test_no_upstream_identifiers_leak_into_code():
         blobs[name.name] = name.read_text(encoding="utf-8")
     for name, blob in blobs.items():
         for lineno, line in enumerate(blob.splitlines(), 1):
-            if "portrayal" not in line.lower():
+            lowered = line.lower()
+            if not any(word in lowered for word in UPSTREAM_WORDS):
                 continue
             # 只允许出现在致谢/来源说明里，绝不能是真实标识符。
             assert "NOTICE" in line or "上游" in line, f"{name}:{lineno} {line.strip()}"
@@ -353,4 +387,5 @@ def test_metadata_declares_the_new_identity():
     assert "astrbot_version" in meta
     # 标识字段里不能残留上游名字；desc 里提到上游是「兼容说明」，允许。
     for field in ("name", "repo", "display_name", "author"):
-        assert "portrayal" not in str(meta[field]).lower(), field
+        for word in UPSTREAM_WORDS:
+            assert word not in str(meta[field]).lower(), f"{field}: {word}"

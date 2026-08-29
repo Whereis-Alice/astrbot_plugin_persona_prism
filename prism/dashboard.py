@@ -107,9 +107,46 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "切换人格时清空上下文",
         "hint": "不清空的话新人格会带着旧人格的记忆说话，容易串味。",
     },
+    "love.enabled": {
+        "label": "启用恋爱成分",
+        "hint": "关掉后「棱镜恋爱」「棱镜恋爱榜」以及兼容指令「今日人设」全部停用。",
+    },
+    "love.min_messages": {
+        "label": "最少发言条数",
+        "hint": "当天语料少于这个数就不出恋爱卡——样本太少算出来的分只是噪声。",
+    },
+    "love.day_start_hour": {
+        "label": "日界时间",
+        "hint": "几点算新的一天。默认 4 点，凌晨的发言仍算前一天，符合熬夜群的作息。",
+    },
+    "love.sensitivity": {
+        "label": "曲线灵敏度",
+        "hint": "50 = 默认。调高则少量互动就能刷出高分，调低则需要更活跃才拿得到分。",
+    },
+    "love.llm_commentary": {
+        "label": "让模型写判词",
+        "hint": "分数永远由公式算（可复现）；关掉后判词退回内置文案，不再消耗模型额度。",
+    },
+    "love.show_trend": {
+        "label": "显示昨日趋势",
+        "hint": "在卡片上标注比昨天升温还是降温。趋势只是提示，不参与计分。",
+    },
+    "love.leaderboard_size": {"label": "排行榜人数", "hint": "「棱镜恋爱榜」列出前几名。"},
+    "love.notice_collect": {
+        "label": "采集互动事件",
+        "hint": "记录戳一戳、表情回应、撤回的次数（仅 QQ 有效）。关掉后这三项恒为 0。",
+    },
+    "love.theme": {
+        "label": "恋爱卡主题",
+        "hint": "恋爱成分卡单独用的主题，默认「恋色樱粉」。选「自动挡」就按每张卡的性子临场挑。",
+    },
     "compat.legacy_commands": {
         "label": "启用「画像」系列指令",
         "hint": "画像 / 正画像 / 负画像 / 克隆人格 / 找对象 / 查看画像 / 切换人格 / 恢复人格。与上游插件同名，同时装两个请关掉一边。",
+    },
+    "compat.love_commands": {
+        "label": "启用「今日人设」指令",
+        "hint": "恋爱成分的上游同名指令。与 astrbot_plugin_love_formula 同名，同时装两个请关掉一边。",
     },
     "behavior.quiet_progress": {
         "label": "静默模式",
@@ -132,6 +169,7 @@ GROUP_TITLES: dict[str, dict[str, str]] = {
     "privacy": {"label": "隐私", "icon": "shield"},
     "inject": {"label": "对话注入", "icon": "chat"},
     "persona_clone": {"label": "人格克隆", "icon": "mask"},
+    "love": {"label": "恋爱成分", "icon": "heart"},
     "behavior": {"label": "行为", "icon": "sliders"},
     "compat": {"label": "上游兼容", "icon": "link"},
 }
@@ -365,7 +403,7 @@ def _field_meta(path: str) -> dict[str, Any]:
     elif path == "collect.cursor_field":
         meta["type"] = "choice"
         meta["choices"] = CURSOR_FIELD_CHOICES
-    elif path == "render.theme":
+    elif path in {"render.theme", "love.theme"}:
         meta["type"] = "choice"
         meta["choices"] = [
             {"value": name, "label": info["label"], "hint": info["desc"]}

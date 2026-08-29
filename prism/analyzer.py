@@ -21,7 +21,7 @@ from .models import CorpusBundle, MemberProfile, Portrait, Section
 from .prompts import PromptSpec, build_system_prompt, build_user_prompt
 
 #: 需要把「和谁互动过」喂给模型的玩法。姻缘/综合画像/红娘都要看社交痕迹。
-_PARTNER_KEYS = frozenset({"match", "portrait", "legacy_match", "legacy_portrait"})
+_PARTNER_KEYS = frozenset({"match", "portrait", "legacy_match", "legacy_portrait", "love"})
 
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
 _SMART_QUOTES = {
@@ -204,6 +204,7 @@ class PrismAnalyzer:
         group_name: str = "",
         profile: MemberProfile | None = None,
         umo: str = "",
+        extra_facts: str = "",
     ) -> tuple[Portrait, str]:
         """执行一次分析，返回 (画像, 模型名)。"""
         provider = self.resolve_provider(umo)
@@ -216,6 +217,7 @@ class PrismAnalyzer:
             profile=profile,
             profile_fields=self._config.profile_fields(),
             include_partners=spec.key in _PARTNER_KEYS or not spec.builtin,
+            extra_facts=extra_facts,
         )
         model = self._config.str_of("llm.model")
         timeout = max(30, self._config.int_of("llm.timeout_sec"))
