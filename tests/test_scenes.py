@@ -181,3 +181,45 @@ class TestEnrichAll:
     def test_empty_list_returns_zero(self):
         assert scenes.enrich_all([], [], [], user_id=ME) == 0
 
+class TestRealText:
+    def test_strips_media_placeholders(self):
+        assert scenes.real_text("[图片][表情]") == ""
+        assert scenes.real_text("[图片×3]看这个") == "看这个"
+
+    def test_keeps_plain_text(self):
+        assert scenes.real_text("今天真热") == "今天真热"
+
+    def test_handles_none_like_input(self):
+        assert scenes.real_text("") == ""
+
+
+class TestSceneHasSubstance:
+    @staticmethod
+    def _u(text: str, mine: bool = False) -> Utterance:
+        return Utterance(speaker="U", text=text, clock="12:00", mine=mine)
+
+    def test_empty_scene_is_rejected(self):
+        assert scenes.scene_has_substance([]) is False
+
+    def test_all_placeholder_scene_is_rejected(self):
+        lines = [
+            self._u("[图片]", mine=True),
+            self._u("[表情]"),
+            self._u("[图片×2]"),
+        ]
+        assert scenes.scene_has_substance(lines) is False
+
+    def test_short_but_real_exchange_passes(self):
+        #: 「在吗 / 在的」也是真对话，不能因为字少就丢掉。
+        lines = [self._u("在吗", mine=True), self._u("在的")]
+        assert scenes.scene_has_substance(lines) is True
+
+    def test_rejected_when_only_others_talk(self):
+        #: 本人那句没有真实文字时，这段撑不起「证据」。
+        lines = [self._u("[图片]", mine=True), self._u("这个梗太强了")]
+        assert scenes.scene_has_substance(lines) is False
+
+    def test_floors_are_configurable(self):
+        lines = [self._u("嗯", mine=True), self._u("好")]
+        assert scenes.scene_has_substance(lines, own_floor=1, total_floor=2) is True
+        assert scenes.scene_has_substance(lines, own_floor=1, total_floor=99) is False

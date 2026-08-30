@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import unicodedata
 from collections.abc import Sequence
@@ -36,6 +37,19 @@ MAX_SPAN = 4
 #: 一段现场最多显示几个气泡（含本人那句）。奇数，好让本人那句居中。
 SCENE_LIMIT = 7
 
+#: 气泡里的媒体占位符。一屏「[图片][表情]」拼不出可信的现场，得先剔掉再数字数。
+_PLACEHOLDER_RE = re.compile(
+    r"\[(?:图片|表情|动画表情|贴纸|语音|视频|文件|音乐|分享|转发|合并转发|红包|位置|卡片|json|xml)"
+    r"(?:×\d+)?\]",
+)
+
+#: 本人那句至少要有这么多真实文字，否则这段现场撑不起「证据」两个字。
+OWN_TEXT_FLOOR = 2
+
+#: 整段现场的真实文字合计下限。低于这个数基本是表情包刷屏。
+#: 只卡到 4：「在吗 / 在的」这种也是真对话，不能因为字少就丢掉。
+SCENE_TEXT_FLOOR = 4
+
 
 def _norm(text: str) -> str:
     return "".join(
@@ -51,6 +65,29 @@ def _media_text(row: dict[str, Any]) -> str:
     if images > 1:
         return f"[图片×{images}]"
     return "[图片]" if images == 1 else ""
+
+
+def real_text(text: str) -> str:
+    """去掉媒体占位符后剩下的真实文字。"""
+    return _PLACEHOLDER_RE.sub("", str(text or "")).strip()
+
+
+def scene_has_substance(
+    lines: Sequence[Utterance],
+    *,
+    own_floor: int = OWN_TEXT_FLOOR,
+    total_floor: int = SCENE_TEXT_FLOOR,
+) -> bool:
+    """这段现场有没有真东西可看。
+
+    只数真实文字：全是图片和表情包的窗口拼出来的「证据」既看不懂也不好看，
+    不如退回单气泡。本人那句和整段各有一个下限。
+    """
+    if not lines:
+        return False
+    own = max((len(real_text(line.text)) for line in lines if line.mine), default=0)
+    total = sum(len(real_text(line.text)) for line in lines)
+    return own >= max(0, own_floor) and total >= max(0, total_floor)
 
 
 def locate_quote(quote: str, messages: Sequence[CorpusMessage]) -> CorpusMessage | None:
@@ -223,7 +260,11 @@ def enrich_evidence(
     if not any(line.mine for line in dialogue):
         # 没定位到本人那句就别硬拼，交给 Evidence.scene_lines 用 quote 兜底。
         return False
-    item.dialogue = center_scene(dialogue, SCENE_LIMIT)
+    picked = center_scene(dialogue, SCENE_LIMIT)
+    if not scene_has_substance(picked):
+        # 整段都是表情包/图片，拼出来也读不出东西，退回单气泡。
+        return False
+    item.dialogue = picked
     if not item.title:
         item.title = scene_title(int(hit.ts or 0), label)
     return True

@@ -53,8 +53,8 @@ EVIDENCE_STYLE: dict[str, dict[str, str]] = {
     "sakura": {"title": "心动物证 · EVIDENCE", "mark": "EVIDENCE", "badge": "心动", "fallback": "心动瞬间"},
 }
 
-#: 每套主题的「头衔」勋章装饰。只有左右两枚小纹样，不写「称号」这种说明文字 ——
-#: 徽章的形状（绶带尖角 + 内描边）本身就该让人一眼看出这是个头衔。
+#: 每套主题的「头衔」铭牌装饰。只有左右两枚小纹样，不写「称号」这种说明文字 ——
+#: 铭牌的形状（奖带折角 + 内描边）本身就该让人一眼看出这是个头衔。
 TITLE_BADGE_STYLE: dict[str, dict[str, str]] = {
     "aurora": {"glyph": "✦", "wing": "✦"},
     "ink": {"glyph": "❖", "wing": "❖"},
@@ -560,36 +560,41 @@ body {
   color: var(--ink-strong);
   word-break: break-all;
 }
-/* 头衔勋章：绶带外形 + 内描边 + 左右纹样，靠形状说明「这是个头衔」，
-   所以徽章里除了头衔本身一个字都不多写。 */
+/* 头衔铭牌：奖带外形（左右折角 + 内描边 + 纹样）。形状本身就告诉人「这是一枚头衔」，
+   所以牌面上除了头衔那几个字，一个说明字都不写。折角用 border 三角形而不是 clip-path，
+   后者在部分出图后端会被丢掉，一丢就退化成普通方块。 */
 .title-badge {
   position: relative;
-  display: inline-flex; align-items: center; gap: 9px;
-  margin-top: 14px; max-width: 100%;
-  padding: 9px 22px 17px;
-  border-radius: 7px 7px 3px 3px;
+  display: inline-flex; align-items: center; gap: 8px;
+  margin: 16px 15px 0; max-width: calc(100% - 30px);
+  padding: 9px 18px;
+  border-radius: 4px;
   background: var(--badge-bg);
   border: var(--badge-border);
   color: var(--badge-ink);
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 74%, 0 100%);
-  box-shadow: 0 10px 22px rgba(0,0,0,.16);
+  box-shadow: 0 7px 18px rgba(0,0,0,.16);
 }
-.title-badge::before {
-  content: ""; position: absolute; inset: 3px;
-  border: 1px solid currentColor; opacity: .26; border-radius: 4px;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%);
+.title-badge::before, .title-badge::after {
+  content: ""; position: absolute; top: 50%; width: 0; height: 0;
+  border-top: 10px solid transparent; border-bottom: 10px solid transparent;
+  transform: translateY(-50%); opacity: .9;
+}
+.title-badge::before { left: -15px; border-right: 15px solid var(--badge-fold, var(--badge-ink)); }
+.title-badge::after { right: -15px; border-left: 15px solid var(--badge-fold, var(--badge-ink)); }
+.title-badge .tb-inner {
+  position: absolute; inset: 3px; border-radius: 2px;
+  border: 1px solid currentColor; opacity: .28;
 }
 .title-badge .tb-glyph, .title-badge .tb-wing {
-  font-size: 12px; opacity: .72; transform: translateY(-4px);
+  font-size: 12px; opacity: .75;
 }
 .title-badge .tb-name {
   font-family: var(--font-title);
-  font-size: 19px; font-weight: 800; line-height: 1.2;
+  font-size: 19px; font-weight: 800; line-height: 1.25;
   letter-spacing: .02em; word-break: break-all;
-  transform: translateY(-4px);
 }
 .title-badge .tb-note {
-  font-size: 12px; opacity: .72; transform: translateY(-3px);
+  font-size: 12px; opacity: .72;
 }
 .title-badge .tb-note::before { content: "（"; }
 .title-badge .tb-note::after { content: "）"; }
@@ -735,6 +740,7 @@ _THEME_CSS: dict[str, str] = {
   --badge-bg: rgba(127,227,255,.14);
   --badge-ink: #9fe9ff;
   --badge-border: 1px solid rgba(127,227,255,.35);
+  --badge-fold: rgba(127,227,255,.42);
   --tag-pos-bg: rgba(90,230,180,.16); --tag-pos-ink: #86f0c4; --tag-pos-line: rgba(90,230,180,.35);
   --tag-neu-bg: rgba(140,170,235,.16); --tag-neu-ink: #b7c8f5; --tag-neu-line: rgba(140,170,235,.34);
   --tag-neg-bg: rgba(255,130,160,.15); --tag-neg-ink: #ff9fb6; --tag-neg-line: rgba(255,130,160,.34);
@@ -781,6 +787,7 @@ _THEME_CSS: dict[str, str] = {
   --badge-bg: #9c3b32;
   --badge-ink: #f7f2e6;
   --badge-border: 1px solid #7d2d26;
+  --badge-fold: #6f2620;
   --tag-pos-bg: rgba(90,130,90,.16); --tag-pos-ink: #3f6b45; --tag-pos-line: rgba(90,130,90,.35);
   --tag-neu-bg: rgba(120,105,80,.14); --tag-neu-ink: #6d6355; --tag-neu-line: rgba(120,105,80,.3);
   --tag-neg-bg: rgba(156,59,50,.13); --tag-neg-ink: #9c3b32; --tag-neg-line: rgba(156,59,50,.3);
@@ -829,6 +836,7 @@ _THEME_CSS: dict[str, str] = {
   --badge-bg: rgba(255,46,154,.14);
   --badge-ink: #ff7ec0;
   --badge-border: 1px solid rgba(255,46,154,.45);
+  --badge-fold: rgba(255,46,154,.6);
   --tag-pos-bg: rgba(0,255,214,.12); --tag-pos-ink: #6ffff0; --tag-pos-line: rgba(0,255,214,.4);
   --tag-neu-bg: rgba(120,160,255,.12); --tag-neu-ink: #9fc0ff; --tag-neu-line: rgba(120,160,255,.35);
   --tag-neg-bg: rgba(255,46,154,.14); --tag-neg-ink: #ff8bc4; --tag-neg-line: rgba(255,46,154,.4);
@@ -837,11 +845,8 @@ _THEME_CSS: dict[str, str] = {
 }
 .who h1 { text-shadow: 0 0 18px rgba(0,255,214,.45); }
 .kicker { text-shadow: 0 0 12px rgba(0,255,214,.6); }
-.title-badge {
-  border-radius: 0; text-shadow: 0 0 14px rgba(255,46,154,.5);
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 70%, 0 100%);
-}
-.title-badge::before { border-radius: 0; opacity: .4; }
+.title-badge { border-radius: 0; text-shadow: 0 0 14px rgba(255,46,154,.5); }
+.title-badge .tb-inner { border-radius: 0; opacity: .45; }
 .title-badge .tb-name { letter-spacing: .06em; }
 """,
     "paper": """
@@ -882,6 +887,7 @@ _THEME_CSS: dict[str, str] = {
   --badge-bg: #16150f;
   --badge-ink: #f7f5f0;
   --badge-border: 1px solid #16150f;
+  --badge-fold: #b4451f;
   --tag-pos-bg: #eef5ee; --tag-pos-ink: #386b3f; --tag-pos-line: #d3e5d4;
   --tag-neu-bg: #f1f2f5; --tag-neu-ink: #4d5566; --tag-neu-line: #dfe2e8;
   --tag-neg-bg: #fbeeea; --tag-neg-ink: #a83f1c; --tag-neg-line: #f0d6cd;
@@ -930,6 +936,7 @@ _THEME_CSS: dict[str, str] = {
   --badge-bg: transparent;
   --badge-ink: #8a2b1e;
   --badge-border: 2px solid #8a2b1e;
+  --badge-fold: #8a2b1e;
   --tag-pos-bg: rgba(70,105,60,.14); --tag-pos-ink: #3f6135; --tag-pos-line: rgba(70,105,60,.35);
   --tag-neu-bg: rgba(80,68,44,.12); --tag-neu-ink: #5d5340; --tag-neu-line: rgba(80,68,44,.3);
   --tag-neg-bg: rgba(138,43,30,.12); --tag-neg-ink: #8a2b1e; --tag-neg-line: rgba(138,43,30,.32);
@@ -939,11 +946,8 @@ _THEME_CSS: dict[str, str] = {
 .kicker { letter-spacing: .34em; }
 .badge { transform: rotate(6deg); font-weight: 700; }
 .sec h3::before { content: "// "; color: var(--accent); }
-.title-badge {
-  border-radius: 2px; transform: rotate(-1.2deg);
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%);
-}
-.title-badge::before { border-radius: 1px; border-style: dashed; opacity: .45; }
+.title-badge { border-radius: 2px; transform: rotate(-1.2deg); }
+.title-badge .tb-inner { border-radius: 1px; border-style: dashed; opacity: .5; }
 """,
     "sakura": """
 :root {
@@ -984,6 +988,7 @@ _THEME_CSS: dict[str, str] = {
   --badge-bg: rgba(255,95,162,.14);
   --badge-ink: #e0357f;
   --badge-border: 1px solid rgba(255,95,162,.4);
+  --badge-fold: rgba(255,95,162,.5);
   --tag-pos-bg: rgba(120,215,180,.2); --tag-pos-ink: #2f8f6c; --tag-pos-line: rgba(120,215,180,.42);
   --tag-neu-bg: rgba(190,170,255,.22); --tag-neu-ink: #7a5bd0; --tag-neu-line: rgba(190,170,255,.44);
   --tag-neg-bg: rgba(255,120,160,.2); --tag-neg-ink: #d63a72; --tag-neg-line: rgba(255,120,160,.42);
@@ -993,11 +998,8 @@ _THEME_CSS: dict[str, str] = {
 .kicker { letter-spacing: .26em; }
 .badge { font-weight: 700; }
 .sec h3::before { content: "♡ "; color: var(--accent); }
-.title-badge {
-  box-shadow: 0 8px 20px rgba(255,95,162,.28);
-  border-radius: 12px 12px 4px 4px;
-}
-.title-badge::before { border-radius: 9px; }
+.title-badge { box-shadow: 0 8px 20px rgba(255,95,162,.28); border-radius: 14px; }
+.title-badge .tb-inner { border-radius: 11px; }
 .tag { font-weight: 600; }
 """,
 }
@@ -1297,7 +1299,7 @@ def _chip_texts(ctx: CardContext) -> list[str]:
 
 
 def _title_badge_html(ctx: CardContext, badge: str) -> str:
-    """把一枚头衔渲染成名字下方的徽章。空串返回空串。"""
+    """把一枚头衔渲染成名字下方的奖带铭牌。空串返回空串。"""
     text = (badge or "").strip()
     if not text:
         return ""
@@ -1308,6 +1310,7 @@ def _title_badge_html(ctx: CardContext, badge: str) -> str:
         text = matched.group(1).strip()
         note = matched.group(2).strip()
     inner = (
+        '<span class="tb-inner"></span>'
         f'<span class="tb-glyph">{_esc(style["glyph"])}</span>'
         f'<span class="tb-name">{_esc(text)}</span>'
     )
@@ -1398,7 +1401,7 @@ def _speaker_color(name: str) -> str:
 
 
 #: 对话里的「中间略」占位行，渲染成聊天截图里的省略分隔，而不是一条气泡。
-_GAP_HINTS = ("中间略", "此处省略", "省略部分对话")
+_GAP_HINTS = ("中间略", "此处省略", "省略部分对话", "隔了")
 
 #: 场景标题里常带着 "23:11 · 深夜救火" 这种时间前缀，拆出来放到标题栏右侧。
 _SCENE_CLOCK_RE = re.compile(r"^(\d{1,2}:\d{2})\s*[·:：\-—]\s*(.+)$")

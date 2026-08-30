@@ -894,36 +894,58 @@ textarea {
   font-family: var(--font-mono);
 }
 
-/* 头衔勋章：跟卡片上是同一套语言 —— 绶带尖角 + 内描边，不写任何说明文字。 */
+/* 头衔铭牌：跟卡片上是同一套语言 —— 奖带折角 + 内描边，不写任何说明文字。 */
 .titlebadge {
   position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 14px 11px;
-  border-radius: 6px 6px 2px 2px;
+  margin: 0 11px;
+  padding: 5px 12px;
+  border-radius: 4px;
   border: 1px solid var(--accent);
   background: var(--accent-soft);
   color: var(--text);
-  max-width: 100%;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%);
+  max-width: calc(100% - 22px);
+}
+
+/* 左右两枚折角，用 border 三角形画，出图后端对 clip-path 支持不一致。 */
+.titlebadge::before,
+.titlebadge::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border-top: 8px solid transparent;
+  border-bottom: 8px solid transparent;
+  transform: translateY(-50%);
+  opacity: 0.85;
+  pointer-events: none;
 }
 
 .titlebadge::before {
-  content: "";
+  left: -11px;
+  border-right: 11px solid var(--accent);
+}
+
+.titlebadge::after {
+  right: -11px;
+  border-left: 11px solid var(--accent);
+}
+
+.titlebadge__inner {
   position: absolute;
   inset: 2px;
   border: 1px solid currentColor;
-  border-radius: 4px;
+  border-radius: 2px;
   opacity: 0.22;
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 70%, 0 100%);
   pointer-events: none;
 }
 
 .titlebadge__glyph {
   font-size: var(--step--2);
   opacity: 0.72;
-  transform: translateY(-3px);
 }
 
 .titlebadge__name {
@@ -933,13 +955,11 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  transform: translateY(-3px);
 }
 
 .titlebadge__note {
   font-size: var(--step--2);
   color: var(--text-2);
-  transform: translateY(-2px);
 }
 
 .record__title {

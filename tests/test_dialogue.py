@@ -141,7 +141,33 @@ class TestRenderLines:
             _row("2", TA, "b", dialogue.SCENE_GAP_SECONDS + 60),
         ]
         lines = dialogue.render_lines(ordered, [0, 1], TA)
-        assert dialogue.GAP_MARK in lines
+        assert any(dialogue.is_gap_line(ln) for ln in lines)
+
+    def test_gap_line_tells_how_long(self):
+        ordered = [
+            _row("1", TA, "a", 0),
+            _row("2", TA, "b", 3600),
+        ]
+        lines = dialogue.render_lines(ordered, [0, 1], TA)
+        assert "\u9694\u4e86" in lines[1]
+
+    def test_quote_line_added_when_origin_not_shown(self):
+        ordered = [
+            _row("1", "1002", "\u665a\u4e0a\u5f00\u9ed1\u5417", 0),
+            _row("2", "1003", "\u65e0\u5173\u7684\u8bdd", 10),
+            _row("3", TA, "\u6765", 20, reply_to="1"),
+        ]
+        lines = dialogue.render_lines(ordered, [2], TA)
+        assert lines[0].startswith(dialogue.QUOTE_PREFIX)
+        assert "\u665a\u4e0a\u5f00\u9ed1\u5417" in lines[0]
+
+    def test_no_quote_line_when_origin_shown(self):
+        ordered = [
+            _row("1", "1002", "\u665a\u4e0a\u5f00\u9ed1\u5417", 0),
+            _row("2", TA, "\u6765", 20, reply_to="1"),
+        ]
+        lines = dialogue.render_lines(ordered, [0, 1], TA)
+        assert not any(ln.startswith(dialogue.QUOTE_PREFIX) for ln in lines)
 
     def test_reply_mark_points_back_to_target(self):
         ordered = [
@@ -200,7 +226,7 @@ class TestBuildDialogueBlock:
     def test_max_lines_is_respected(self):
         rows = [_row(str(i), TA if i % 2 else "1002", "x" + str(i), i * 10) for i in range(40)]
         block = dialogue.build_dialogue_block(rows, TA, context=2, max_lines=6)
-        real = [ln for ln in block.split("\n") if ln != dialogue.GAP_MARK]
+        real = [ln for ln in block.split("\n") if not dialogue.is_gap_line(ln)]
         assert len(real) <= 6
 
     def test_external_names_used_in_output(self):
@@ -258,3 +284,172 @@ class TestSocialSignals:
 
     def test_empty_rows_give_empty_prompt_block(self):
         assert dialogue.social_signals([], TA).to_prompt_block() == ""
+
+class TestTurns:
+    def test_quiet_gap_splits_turns(self):
+        ordered = [_row("1", TA, "a", 0), _row("2", TA, "b", dialogue.TURN_GAP_SECONDS + 60)]
+        turns = dialogue.split_turns(ordered)
+        assert [(t.start, t.end) for t in turns] == [(0, 0), (1, 1)]
+
+    def test_dense_rows_stay_one_turn(self):
+        ordered = [_row(str(i), TA, "x", i * 30) for i in range(5)]
+        assert len(dialogue.split_turns(ordered)) == 1
+
+    def test_empty_rows_have_no_turn(self):
+        assert dialogue.split_turns([]) == []
+
+    def test_turn_of_finds_owner(self):
+        ordered = [_row("1", TA, "a", 0), _row("2", TA, "b", dialogue.TURN_GAP_SECONDS + 60)]
+        turns = dialogue.split_turns(ordered)
+        assert dialogue.turn_of(turns, 1).start == 1
+        assert dialogue.turn_of(turns, 9) is None
+
+    def test_clip_turn_centers_on_anchor(self):
+        turn = dialogue.Turn(0, 19)
+        picked = dialogue.clip_turn(turn, 10, 5)
+        assert picked == [8, 9, 10, 11, 12]
+
+    def test_clip_turn_keeps_short_turn_whole(self):
+        assert dialogue.clip_turn(dialogue.Turn(2, 4), 3, 9) == [2, 3, 4]
+
+    def test_clip_turn_shifts_back_at_tail(self):
+        assert dialogue.clip_turn(dialogue.Turn(0, 9), 9, 3) == [7, 8, 9]
+
+class TestGradeAnchors:
+    def test_reply_to_other_is_edge(self):
+        ordered = [
+            _row("1", "1002", "\u5728\u5417", 0),
+            _row("2", TA, "\u5728", 10, reply_to="1"),
+        ]
+        assert dialogue.grade_anchors(ordered, TA)[1] == dialogue.TIER_EDGE
+
+    def test_being_replied_is_edge(self):
+        ordered = [
+            _row("1", TA, "\u6211\u56de\u6765\u4e86", 0),
+            _row("2", "1002", "\u6b22\u8fce", 10, reply_to="1"),
+        ]
+        assert dialogue.grade_anchors(ordered, TA)[1] == dialogue.TIER_EDGE
+
+    def test_consecutive_own_lines_are_run(self):
+        ordered = [_row("1", TA, "a", 0), _row("2", TA, "b", 10)]
+        tiers = dialogue.grade_anchors(ordered, TA)
+        assert tiers[0] == dialogue.TIER_RUN
+        assert tiers[1] == dialogue.TIER_RUN
+
+    def test_isolated_line_is_alone(self):
+        ordered = [
+            _row("1", "1002", "a", 0),
+            _row("2", TA, "b", 10),
+            _row("3", "1003", "c", 20),
+        ]
+        assert dialogue.grade_anchors(ordered, TA)[1] == dialogue.TIER_ALONE
+
+    def test_blank_target_has_no_tier(self):
+        rows = [_row("1", TA, "a", 0)]
+        assert dialogue.grade_anchors(rows, "") == {}
+
+class TestSelectLines:
+    def test_zero_context_returns_anchors_only(self):
+        ordered = [
+            _row("1", "1002", "a", 0),
+            _row("2", TA, "b", 10),
+        ]
+        tiers = dialogue.grade_anchors(ordered, TA)
+        picked = dialogue.select_lines(ordered, tiers, context=0, max_lines=10, max_scenes=5)
+        assert picked == [1]
+
+    def test_edge_tier_wins_the_only_slot(self):
+        rows = []
+        for i in range(3):
+            base = i * (dialogue.TURN_GAP_SECONDS * 3)
+            rows.append(_row("a" + str(i), "1002", "\u95f2\u804a", base))
+            rows.append(_row("b" + str(i), TA, "\u55ef", base + 30))
+        rows[-1]["reply_to"] = "a2"
+        ordered = dialogue.order_rows(rows)
+        tiers = dialogue.grade_anchors(ordered, TA)
+        picked = dialogue.select_lines(ordered, tiers, context=2, max_lines=40, max_scenes=1)
+        assert picked == [4, 5]
+
+    def test_line_budget_keeps_recent_tail(self):
+        ordered = [_row(str(i), TA if i % 2 else "1002", "x", i * 10) for i in range(20)]
+        tiers = dialogue.grade_anchors(ordered, TA)
+        picked = dialogue.select_lines(ordered, tiers, context=3, max_lines=4, max_scenes=6)
+        assert len(picked) == 4
+        assert picked == sorted(picked)
+
+    def test_no_tier_gives_nothing(self):
+        ordered = [_row("1", "1002", "a", 0)]
+        assert dialogue.select_lines(ordered, {}, context=2, max_lines=10, max_scenes=3) == []
+
+class TestGapMark:
+    def test_minutes(self):
+        assert "\u5206\u949f" in dialogue.gap_mark(20 * 60)
+
+    def test_hours(self):
+        assert "\u5c0f\u65f6" in dialogue.gap_mark(3 * 3600)
+
+    def test_days(self):
+        assert "\u5929" in dialogue.gap_mark(3 * 86400)
+
+    def test_short_gap_falls_back(self):
+        assert dialogue.gap_mark(30) == dialogue.GAP_MARK
+
+    def test_is_gap_line_rejects_normal_line(self):
+        assert not dialogue.is_gap_line("[TA] \u72d0\u72f8\uff1a\u5728")
+
+    def test_is_gap_line_accepts_all_marks(self):
+        assert dialogue.is_gap_line(dialogue.GAP_MARK)
+        assert dialogue.is_gap_line(dialogue.gap_mark(3600))
+
+
+class TestAnswerRate:
+    def test_quick_reply_counts_as_answered(self):
+        rows = [
+            _row("1", TA, "\u5728\u5417", 0),
+            _row("2", "1002", "\u5728", 30),
+        ]
+        sig = dialogue.social_signals(rows, TA)
+        assert sig.answered == 1
+        assert sig.unanswered == 0
+        assert sig.answer_rate == 1.0
+
+    def test_late_reply_counts_as_cold(self):
+        rows = [
+            _row("1", TA, "\u5728\u5417", 0),
+            _row("2", "1002", "x", dialogue.RESPONSE_WINDOW_SECONDS + 600),
+        ]
+        assert dialogue.social_signals(rows, TA).unanswered == 1
+
+    def test_burst_settles_once(self):
+        rows = [
+            _row("1", TA, "a", 0),
+            _row("2", TA, "b", 5),
+            _row("3", TA, "c", 10),
+            _row("4", "1002", "\u6536\u5230", 20),
+        ]
+        sig = dialogue.social_signals(rows, TA)
+        assert sig.answered == 1
+        assert sig.unanswered == 0
+
+    def test_last_line_in_window_is_not_judged(self):
+        rows = [_row("1", "1002", "a", 0), _row("2", TA, "b", 10)]
+        sig = dialogue.social_signals(rows, TA)
+        assert sig.answered == 0
+        assert sig.unanswered == 0
+
+    def test_bot_reply_does_not_count_as_answer(self):
+        rows = [
+            _row("1", TA, "\u5728\u5417", 0),
+            _row("2", BOT, "\u5728", 5),
+        ]
+        sig = dialogue.social_signals(rows, TA, self_id=BOT)
+        assert sig.answered == 0
+        assert sig.unanswered == 0
+
+    def test_answer_rate_appears_in_prompt_block(self):
+        rows = [
+            _row("1", TA, "\u5728\u5417", 0),
+            _row("2", "1002", "\u5728", 30),
+        ]
+        block = dialogue.social_signals(rows, TA).to_prompt_block()
+        assert "\u63a5\u8bdd\u7387" in block

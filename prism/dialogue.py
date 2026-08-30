@@ -28,11 +28,30 @@ LABEL_TARGET = "[TA]"
 LABEL_OTHER = "[其他人]"
 LABEL_BOT = "[机器人]"
 
-#: 片段之间的断裂提示。
+#: 片段之间的断裂提示。中间跳过的内容不长、或算不出间隔时用这一句。
 GAP_MARK = "……（中间略）……"
+
+#: 引用行的前缀：被回复的那条原话离得太远、没被拉进现场时，单独贴一行给模型看。
+QUOTE_PREFIX = "    ↳ 引用"
 
 #: 时间间隔超过这个秒数就算两个不同的场景，即使索引相邻。
 SCENE_GAP_SECONDS = 20 * 60
+
+#: 群里安静超过这个秒数，就认为上一轮聊完了 —— 用来把群历史切成一段段「对话回合」。
+#: 按回合取上下文比「前后各 N 条」准得多：一个回合本来就是一次完整的来回。
+TURN_GAP_SECONDS = 8 * 60
+
+#: 一个回合最多展开多少行。回合本身比这短就整段拿走，超了就以锚点为中心裁。
+TURN_LINE_CAP = 9
+
+#: 判定「有人接话」的时间窗：TA 说完这么久之内有别人开口才算接上了。
+#: 群聊不是一问一答，用时间口径比「下一条是不是别人说的」贴近真实体感。
+RESPONSE_WINDOW_SECONDS = 5 * 60
+
+#: 锚点等级。数字越小越优先展开：真实对话边 > 连续发言 > 孤零零一句。
+TIER_EDGE = 0
+TIER_RUN = 1
+TIER_ALONE = 2
 
 
 def _split_ids(raw: Any) -> list[str]:
@@ -112,6 +131,18 @@ class SocialSignals:
     mine: int = 0
     #: 窗口内所有人的发言条数
     total: int = 0
+    #: TA 说完话后，5 分钟内有人接着开口的次数（按连续发言段结算）
+    answered: int = 0
+    #: TA 说完话后，窗口内迟迟没人出声的次数
+    unanswered: int = 0
+
+    @property
+    def answer_rate(self) -> float:
+        """TA 开口后被人接住的比例。群聊不是一问一答，所以用时间口径而不是"下一条是谁"。"""
+        base = self.answered + self.unanswered
+        if base <= 0:
+            return 0.0
+        return self.answered / float(base)
 
     @property
     def response_rate(self) -> float:
@@ -137,7 +168,12 @@ class SocialSignals:
                 f"（平均每 10 句能收到 {self.response_rate * 10:.1f} 次回应）",
             )
         elif self.mine >= 10:
-            lines.append("- 窗口内没有检测到别人回复或 @ TA（可能确实少人接话，也可能协议端没上报引用关系）")
+            lines.append("- 窗口内没检测到别人回复或 @ TA（也可能是协议端没上报引用关系）")
+        if self.answered or self.unanswered:
+            lines.append(
+                f"- TA 说完后 5 分钟内有人接着开口 {self.answered} 次，"
+                f"没人立刻出声 {self.unanswered} 次（接话率 {self.answer_rate * 100:.0f}%）",
+            )
         if self.responders:
             who = "、".join(f"{name}({count}次)" for name, count in self.responders[:5])
             lines.append(f"- 最常接 TA 话的人：{who}")
@@ -198,6 +234,21 @@ def social_signals(
             responders[who] = responders.get(who, 0) + 1
     sig.responders = sorted(responders.items(), key=lambda kv: (-kv[1], kv[0]))
     sig.addressed = sorted(addressed.items(), key=lambda kv: (-kv[1], kv[0]))
+    # 时间口径的「有人接话吗」：只在 TA 一段连续发言的最后一句结算，
+    # 免得刷屏 5 条被算成 5 次；窗口最末一句不判定，那是取样边界不是冷场。
+    people = [r for r in ordered if not (bot and str(r.get("user_id") or "") == bot)]
+    for index, row in enumerate(people):
+        if str(row.get("user_id") or "") != target or not target:
+            continue
+        nxt = people[index + 1] if index + 1 < len(people) else None
+        if nxt is None or str(nxt.get("user_id") or "") == target:
+            continue
+        ts = int(row.get("ts") or 0)
+        nts = int(nxt.get("ts") or 0)
+        if ts and nts and nts - ts <= RESPONSE_WINDOW_SECONDS:
+            sig.answered += 1
+        else:
+            sig.unanswered += 1
     return sig
 
 
@@ -271,6 +322,183 @@ def collect_windows(
     return picked
 
 
+@dataclass(slots=True)
+class Turn:
+    """一段「对话回合」：中间没有长时间静默的连续消息，start/end 均含。"""
+
+    start: int
+    end: int
+
+    @property
+    def size(self) -> int:
+        return self.end - self.start + 1
+
+
+def split_turns(
+    ordered: Sequence[dict[str, Any]],
+    *,
+    gap: int = TURN_GAP_SECONDS,
+) -> list[Turn]:
+    """按静默时长把群历史切成一段段对话回合。
+
+    群聊的一次来回往往横跨十几条、几分钟，中间还夹着别人插话；按「前后各 N 条」
+    切会把一次完整的对话切断，也会把两个不相干的话题粘在一起。按静默切更贴近
+    真实的聊天节奏：安静下来了，这一轮就算聊完了。
+    """
+    turns: list[Turn] = []
+    if not ordered:
+        return turns
+    start = 0
+    prev_ts = int(ordered[0].get("ts") or 0)
+    for index in range(1, len(ordered)):
+        ts = int(ordered[index].get("ts") or 0)
+        if prev_ts and ts and ts - prev_ts > max(0, int(gap)):
+            turns.append(Turn(start, index - 1))
+            start = index
+        prev_ts = ts or prev_ts
+    turns.append(Turn(start, len(ordered) - 1))
+    return turns
+
+
+def turn_of(turns: Sequence[Turn], index: int) -> Turn | None:
+    """找出某一行属于哪个回合。"""
+    for turn in turns:
+        if turn.start <= index <= turn.end:
+            return turn
+    return None
+
+
+def message_owners(ordered: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """message_id → 发送者 uid，用来把 reply_to 还原成「回的是谁」。"""
+    owner: dict[str, str] = {}
+    for row in ordered:
+        mid = str(row.get("message_id") or "")
+        if mid:
+            owner[mid] = str(row.get("user_id") or "")
+    return owner
+
+
+def grade_anchors(
+    ordered: Sequence[dict[str, Any]],
+    target_id: str,
+) -> dict[int, int]:
+    """给每个锚点分级：哪些位置最值得花预算展开成对话现场。
+
+    TIER_EDGE 是真的有来有往（TA 回别人 / 别人回 TA / 互相 @），展开它最能看清
+    TA 在关系里的样子；TIER_RUN 是 TA 连着说的一串，多半是在讲一件事；
+    TIER_ALONE 是孤零零一句，信息量最低，只在预算有余时才展开。
+    """
+    target = str(target_id or "")
+    if not target:
+        return {}
+    owner = message_owners(ordered)
+    tiers: dict[int, int] = {}
+    for index, row in enumerate(ordered):
+        uid = str(row.get("user_id") or "")
+        reply_to = str(row.get("reply_to") or "")
+        parent = owner.get(reply_to, "")
+        ats = _split_ids(row.get("at_ids"))
+        if uid and uid == target:
+            # 回了谁（哪怕原话没在库里）、或 @ 了别人，都算一条对话边。
+            outward = bool(reply_to and parent != target) or any(a and a != target for a in ats)
+            tiers[index] = TIER_EDGE if outward else TIER_ALONE
+            continue
+        if (reply_to and parent == target) or target in ats:
+            tiers[index] = TIER_EDGE
+    total = len(ordered)
+    for index, tier in list(tiers.items()):
+        if tier != TIER_ALONE:
+            continue
+        for step in (-1, 1):
+            near = index + step
+            if 0 <= near < total and str(ordered[near].get("user_id") or "") == target:
+                tiers[index] = TIER_RUN
+                break
+    return tiers
+
+
+def clip_turn(turn: Turn, anchor: int, cap: int) -> list[int]:
+    """回合太长时，以锚点为中心裁出一段，尽量把上下文对称留在两边。"""
+    if cap <= 0 or turn.size <= cap:
+        return list(range(turn.start, turn.end + 1))
+    half = cap // 2
+    low = max(turn.start, anchor - half)
+    high = low + cap - 1
+    if high > turn.end:
+        high = turn.end
+        low = high - cap + 1
+    return list(range(low, high + 1))
+
+
+def select_lines(
+    ordered: Sequence[dict[str, Any]],
+    tiers: dict[int, int],
+    *,
+    context: int,
+    max_lines: int,
+    max_scenes: int,
+    turn_gap: int = TURN_GAP_SECONDS,
+) -> list[int]:
+    """按锚点等级和回合边界挑出要渲染的行。
+
+    context <= 0 时退回老行为（只要 TA 那几句，不带上下文），方便需要「纯语料」
+    的场合复用。否则按回合展开：优先 TIER_EDGE，其次 TIER_RUN，最后 TIER_ALONE；
+    每一级内部均匀抽样，保证覆盖整段时间而不是全挤在最新那几分钟。
+    """
+    if not ordered or not tiers:
+        return []
+    span = max(0, int(context))
+    if span <= 0:
+        anchors = pick_evenly(sorted(tiers), max_scenes)
+        if max_lines > 0 and len(anchors) > max_lines:
+            anchors = anchors[-max_lines:]
+        return anchors
+    turns = split_turns(ordered, gap=turn_gap)
+    cap = max(2 * span + 1, TURN_LINE_CAP)
+    budget = max_lines if max_lines > 0 else len(ordered)
+    slots = max_scenes if max_scenes > 0 else len(tiers)
+    keep: set[int] = set()
+    used: set[int] = set()
+    for tier in (TIER_EDGE, TIER_RUN, TIER_ALONE):
+        if slots <= 0 or len(keep) >= budget:
+            break
+        anchors = [index for index, value in sorted(tiers.items()) if value == tier]
+        anchors = [index for index in anchors if (turn_of(turns, index) or Turn(-1, -1)).start not in used]
+        if not anchors:
+            continue
+        for anchor in pick_evenly(anchors, slots):
+            turn = turn_of(turns, anchor)
+            if turn is None or turn.start in used:
+                continue
+            used.add(turn.start)
+            keep.update(clip_turn(turn, anchor, cap))
+            slots -= 1
+            if slots <= 0 or len(keep) >= budget:
+                break
+    picked = sorted(keep)
+    if max_lines > 0 and len(picked) > max_lines:
+        picked = picked[-max_lines:]
+    return picked
+
+
+def gap_mark(seconds: int) -> str:
+    """把两段现场之间的空档写成人话。模型对「隔了多久」比「中间略」敏感得多。"""
+    sec = max(0, int(seconds or 0))
+    if sec >= 2 * 86400:
+        return f"……（隔了 {sec // 86400} 天）……"
+    if sec >= 90 * 60:
+        return f"……（隔了 {sec // 3600} 小时）……"
+    if sec >= 5 * 60:
+        return f"……（隔了 {sec // 60} 分钟）……"
+    return GAP_MARK
+
+
+def is_gap_line(line: str) -> bool:
+    """判断一行是不是空档提示（含 GAP_MARK 和「隔了 N 分钟」这类）。"""
+    text = (line or "").strip()
+    return text.startswith("……（") and text.endswith("）……")
+
+
 def render_lines(
     ordered: Sequence[dict[str, Any]],
     indices: Sequence[int],
@@ -280,15 +508,21 @@ def render_lines(
     self_id: str = "",
     with_clock: bool = True,
 ) -> list[str]:
-    """把选中的行渲染成带标签的对话行，断裂处插入省略提示。"""
+    """把选中的行渲染成带标签的对话行。
+
+    两处细节：断裂处按真实时长写成「隔了 N 分钟」，模型才知道这不是连着说的；
+    被回复的原话如果没被选进来，就在那行之前补一条引用行。
+    """
     nick = name_index(ordered, names)
     target = str(target_id or "")
     bot = str(self_id or "")
-    owner: dict[str, str] = {}
-    for row in ordered:
+    owner = message_owners(ordered)
+    slot: dict[str, int] = {}
+    for index, row in enumerate(ordered):
         mid = str(row.get("message_id") or "")
         if mid:
-            owner[mid] = str(row.get("user_id") or "")
+            slot[mid] = index
+    shown = set(indices)
     out: list[str] = []
     prev_index = -1
     prev_ts = 0
@@ -301,7 +535,17 @@ def render_lines(
         if prev_index >= 0 and (
             index - prev_index > 1 or (prev_ts and ts and ts - prev_ts > SCENE_GAP_SECONDS)
         ):
-            out.append(GAP_MARK)
+            out.append(gap_mark(ts - prev_ts if prev_ts and ts else 0))
+        # 被回复的原话没被拉进现场时单独贴一行，否则「回应某人」是句空话。
+        reply_id = str(row.get("reply_to") or "")
+        origin = slot.get(reply_id, -1)
+        if reply_id and origin >= 0 and origin not in shown:
+            quoted = _text_of(ordered[origin])
+            if quoted:
+                owner_id = str(ordered[origin].get("user_id") or "")
+                quoted_who = "TA" if owner_id and owner_id == target else _name_of(ordered[origin], nick)
+                clipped = quoted if len(quoted) <= 40 else quoted[:40] + "…"
+                out.append(f"{QUOTE_PREFIX} {quoted_who}：{clipped}")
         uid = str(row.get("user_id") or "")
         if bot and uid == bot:
             label = LABEL_BOT
@@ -327,9 +571,9 @@ def render_lines(
         out.append(f"{head}{label} {who}{tag}：{body}")
         prev_index = index
         prev_ts = ts
-    while out and out[0] == GAP_MARK:
+    while out and is_gap_line(out[0]):
         out.pop(0)
-    while out and out[-1] == GAP_MARK:
+    while out and is_gap_line(out[-1]):
         out.pop()
     return out
 
@@ -347,16 +591,23 @@ def build_dialogue_block(
 ) -> str:
     """拼出「对话现场」文本块。没有可用内容时返回空串。
 
-    context 指锚点前后各取几条；max_scenes 限制展开多少个锚点（均匀抽样，
-    保证覆盖整段时间而不是全挤在最新那几分钟）；max_lines 是总行数上限。
+    context 决定一段现场铺多宽（回合太长时以锚点为中心裁 2*context+1 行起）；
+    max_scenes 是最多展开几段现场（按时间均匀抽样，覆盖整段跨度而不是只看最新
+    那几分钟）；max_lines 是总行数上限。
     """
     ordered = order_rows(rows)
     if not ordered:
         return ""
-    anchors = pick_evenly(anchor_indices(ordered, target_id), max_scenes)
-    if not anchors:
+    tiers = grade_anchors(ordered, target_id)
+    if not tiers:
         return ""
-    indices = collect_windows(ordered, anchors, context=context, max_lines=max_lines)
+    indices = select_lines(
+        ordered,
+        tiers,
+        context=context,
+        max_lines=max_lines,
+        max_scenes=max_scenes,
+    )
     lines = render_lines(
         ordered,
         indices,
@@ -365,7 +616,7 @@ def build_dialogue_block(
         self_id=self_id,
         with_clock=with_clock,
     )
-    if not any(line != GAP_MARK for line in lines):
+    if not any(not is_gap_line(line) for line in lines):
         return ""
     return "\n".join(lines)
 

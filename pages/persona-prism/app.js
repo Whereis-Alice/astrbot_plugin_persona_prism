@@ -758,7 +758,7 @@ function renderTree() {
 }
 
 //: 对话里的「中间略」占位行，画成省略分隔而不是一条气泡。
-const GAP_HINTS = ["中间略", "此处省略", "省略部分对话"];
+const GAP_HINTS = ["中间略", "此处省略", "省略部分对话", "隔了"];
 
 //: 场景标题常带着 "23:11 · 深夜救火" 这种时间前缀，拆到标题栏右侧去。
 function splitSceneTitle(title, lines) {
@@ -770,7 +770,7 @@ function splitSceneTitle(title, lines) {
   return { title: text, clock: (own && own.clock) || (any && any.clock) || "" };
 }
 
-//: 专属头衔徽章。头衔形如「纯爱战神（反讽）」，括注单独降一号字。
+//: 头衔铭牌。头衔形如「纯爱战神（反讽）」，括注单独降一号字。
 function titleBadge(raw) {
   const text = String(raw || "").trim();
   if (!text) return null;
@@ -779,6 +779,7 @@ function titleBadge(raw) {
   const note = matched && matched[1].trim() ? matched[2].trim() : "";
   const box = make("span", "titlebadge");
   append(box, [
+    make("span", "titlebadge__inner"),
     make("span", "titlebadge__glyph", "✦"),
     make("span", "titlebadge__name", name),
     note ? make("span", "titlebadge__note", "（" + note + "）") : null,

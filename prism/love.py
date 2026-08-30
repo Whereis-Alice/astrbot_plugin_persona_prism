@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .models import Dimension, Evidence, Portrait, Section, Tag, Term
-from .scenes import rows_to_utterances
+from .scenes import center_scene, rows_to_utterances, scene_has_substance, slice_around
 from .titles import love_title, normalize_title
 
 #: 归一化曲线的默认斜率。normalize(20)≈46、normalize(50)≈84。
@@ -860,35 +860,42 @@ def build_scenes(
             score += 0.6
         candidates.append((score, index, kind))
     candidates.sort(key=lambda item: (-item[0], item[1]))
-    chosen: list[tuple[int, str]] = []
+    # 取景、扩窗、裁剪全部走 scenes 模块那一份实现，保证恋爱诊断和「棱镜」系列的
+    # 现场长得一模一样；拼不出内容的候选直接跳过，换下一个分数更低但看得懂的。
+    picked: list[tuple[int, Evidence]] = []
+    taken: list[int] = []
     for _score, index, kind in candidates:
-        if any(abs(index - taken) <= context for taken, _ in chosen):
-            continue
-        chosen.append((index, kind))
-        if len(chosen) >= max(1, limit):
+        if len(picked) >= max(1, limit):
             break
-    chosen.sort()
-    scenes: list[Evidence] = []
-    for index, kind in chosen:
-        lo = max(0, index - context)
-        hi = min(len(ordered), index + context + 1)
-        # 气泡拼装与「棱镜」系列共用一份实现，保证两边的证供长得一模一样。
-        dialogue = rows_to_utterances(ordered[lo:hi], user_id, names=nick)
-        if not dialogue:
+        if any(abs(index - spot) <= context for spot in taken):
             continue
         stamp = int(ordered[index].get("ts") or 0)
+        window = slice_around(
+            ordered,
+            message_id=str(ordered[index].get("message_id") or ""),
+            center_ts=stamp,
+            context=context,
+            user_id=user_id,
+            min_others=1,
+        )
+        dialogue = center_scene(rows_to_utterances(window, user_id, names=nick))
+        if not dialogue or not scene_has_substance(dialogue):
+            continue
         clock = time.strftime("%H:%M", time.localtime(stamp)) if stamp else ""
         label = label_of.get(kind, "日常片段")
         title = f"{clock} · {label}" if clock else label
-        scenes.append(
+        taken.append(index)
+        picked.append((
+            index,
             Evidence(
                 quote=str(ordered[index].get("text") or "").strip(),
                 reason=_SCENE_REASONS.get(kind, ""),
                 title=title,
                 dialogue=dialogue,
             ),
-        )
-    return scenes
+        ))
+    picked.sort(key=lambda item: item[0])
+    return [scene for _index, scene in picked]
 
 
 def _diagnosis_section(metrics: LoveMetrics, seed: str) -> Section:

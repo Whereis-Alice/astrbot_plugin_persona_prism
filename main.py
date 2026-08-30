@@ -183,6 +183,14 @@ def _parse_days(text: str, command: str, *, default: int = 1, cap: int = 30) -> 
     return min(days, max(1, cap))
 
 
+def _self_id(event: AstrMessageEvent) -> str:
+    """机器人自己的 uid。协议端没实现就返回空串，调用方按「未知」处理。"""
+    try:
+        return str(event.get_self_id() or "")
+    except Exception:
+        return ""
+
+
 def _fmt_ts(ts: Any, pattern: str = "%Y-%m-%d") -> str:
     number = _as_int(ts)
     if not number or number <= 0:
@@ -229,6 +237,8 @@ class PersonaPrismStar(Star):
         self._window_scan: dict[str, tuple[float, bool]] = {}
         #: 节流告警的上次时间。key 是告警类别。
         self._warn_at: dict[str, float] = {}
+        #: 已清过机器人自身残留语料的「平台:群:bot」，同一进程内只清一次。
+        self._bot_purged: set[str] = set()
 
         self._register_dashboard_apis()
         logger.info("[人格棱镜] %s 已加载，数据目录：%s", PLUGIN_VERSION, self.data_dir)
@@ -300,7 +310,7 @@ class PersonaPrismStar(Star):
         「@某人 画像」这种把 At 放在最前面的写法完全解析不到目标；
         同时没有排除 @bot，@机器人触发时会给机器人自己画像。
         """
-        self_id = str(event.get_self_id() or "")
+        self_id = _self_id(event)
         for seg in event.get_messages() or []:
             if isinstance(seg, Comp.At):
                 at_id = str(getattr(seg, "qq", "") or "")
@@ -383,6 +393,22 @@ class PersonaPrismStar(Star):
 
     # ---------------------------------------------------------------- 语料采集
 
+    async def _purge_bot_rows(self, platform: str, group_id: str, self_id: str) -> None:
+        """清掉早先版本误入库的机器人自身发言，每个群每进程只清一次。"""
+        if not self_id or not group_id:
+            return
+        key = f"{platform}:{group_id}:{self_id}"
+        if key in self._bot_purged:
+            return
+        self._bot_purged.add(key)
+        try:
+            removed = int(await self.astore.clear_user_corpus(platform, group_id, self_id) or 0)
+        except Exception as exc:
+            logger.debug("[人格棱镜] 清理机器人自身语料失败：%s", exc)
+            return
+        if removed:
+            logger.info("[人格棱镜] 群 %s 清掉 %s 条机器人自己的旧语料。", group_id, removed)
+
     async def _capture(self, event: AstrMessageEvent, platform: str, group_id: str) -> None:
         """被动记录当前这条群消息。
 
@@ -392,6 +418,12 @@ class PersonaPrismStar(Star):
         user_id = str(event.get_sender_id() or "")
         if not user_id:
             return
+        self_id = _self_id(event)
+        if self_id and user_id == self_id:
+            #: 少数协议端会把机器人自己发出去的消息也当群消息回灌。让它入库等于
+            #: 让插件拿自己的输出画像，统计口径也会虚高，直接丢掉。
+            return
+        await self._purge_bot_rows(platform, group_id, self_id)
         segments = event.get_messages() or []
         rich = collector.parse_segments_rich(segments)
         text = rich["text"]
@@ -589,6 +621,7 @@ class PersonaPrismStar(Star):
             or history.normalize_strategy(state.get("cursor_field"))
             or history.STRATEGIES[0]
         )
+        self_id = _self_id(event)
         tried: set[str] = set()
         cursor: int | None = None
         prev_ids: set[str] = set()
@@ -622,7 +655,7 @@ class PersonaPrismStar(Star):
                 continue
             prev_ids = page_ids
             pages += 1
-            added += await self._ingest_history_page(platform, group_id, messages)
+            added += await self._ingest_history_page(platform, group_id, messages, self_id)
             oldest = self._page_oldest_ts(messages)
             if oldest and oldest < start_ts:
                 covered = True
@@ -669,10 +702,19 @@ class PersonaPrismStar(Star):
         oldest, _ = history.page_time_range(messages)
         return collector.to_epoch_seconds(oldest) if oldest else 0
 
-    async def _ingest_history_page(self, platform: str, group_id: str, messages: Any) -> int:
+    async def _ingest_history_page(
+        self,
+        platform: str,
+        group_id: str,
+        messages: Any,
+        self_id: str = "",
+    ) -> int:
         """清洗一页群历史并入库，返回新增条数。纯图 / 极短消息按互动信号保留。"""
         rows = collector.parse_history_page(messages)
         rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
+        if self_id:
+            #: 机器人自己刷的卡片文案不是语料，混进去会污染画像和统计口径。
+            rows = [row for row in rows if str(row.get("user_id") or "") != self_id]
         cleaned = collector.clean_rows(
             rows,
             min_chars=self.config.int_of("collect.min_chars"),
@@ -726,6 +768,7 @@ class PersonaPrismStar(Star):
             report.supported = False
             return report
 
+        bot_id = _self_id(event)
         rounds = max(0, self.config.int_of("collect.backfill_rounds"))
         page_size = max(20, self.config.int_of("collect.page_size"))
         report.planned_rounds = rounds
@@ -872,6 +915,8 @@ class PersonaPrismStar(Star):
                 report.scanned += len(messages)
             rows = collector.parse_history_page(messages)
             rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
+            if bot_id:
+                rows = [row for row in rows if str(row.get("user_id") or "") != bot_id]
             cleaned = collector.clean_rows(
                 rows,
                 min_chars=self.config.int_of("collect.min_chars"),
@@ -1067,7 +1112,7 @@ class PersonaPrismStar(Star):
         merged: dict[str, dict[str, Any]] = {}
         for stamp in dialogue.pick_evenly(stamps, max(1, max_scenes)):
             try:
-                rows = await self.astore.context_rows(platform, group_id, stamp, span=600, limit=60)
+                rows = await self.astore.context_rows(platform, group_id, stamp, span=900, limit=80)
             except Exception:  # 少一段上下文而已，不能拖垮整次分析
                 continue
             for row in rows:
@@ -1078,9 +1123,7 @@ class PersonaPrismStar(Star):
             return "", ""
         rows = sorted(merged.values(), key=lambda r: int(r.get("ts") or 0))
         names = love.collect_names(rows)
-        self_id = ""
-        with contextlib.suppress(Exception):
-            self_id = str(event.get_self_id() or "")
+        self_id = _self_id(event)
         block = dialogue.build_dialogue_block(
             rows,
             target_id,
@@ -1678,9 +1721,7 @@ class PersonaPrismStar(Star):
                 from_cache=True,
             )
 
-            self_id = ""
-            with contextlib.suppress(Exception):
-                self_id = str(event.get_self_id() or "")
+            self_id = _self_id(event)
             names = love.collect_names(rows)
             #: 恋爱诊断本来就把整个窗口的群聊都拿在手上，直接切成对话现场即可。
             love_dialogue = ""
