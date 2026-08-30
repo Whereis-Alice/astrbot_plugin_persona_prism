@@ -16,6 +16,7 @@ from astrbot_plugin_persona_prism.prism.prompts import (
     build_system_prompt,
     build_user_prompt,
     load_builtin_specs,
+    persona_tail,
 )
 
 #: key -> (命令, 标签, 是否结构化, 归一化后的布局)
@@ -269,5 +270,61 @@ def test_json_contract_demands_quotable_evidence_and_low_confidence() -> None:
 def test_json_contract_describes_scene_dialogue() -> None:
     assert "dialogue" in JSON_CONTRACT
     assert "[本人]" in JSON_CONTRACT
-    assert "前后各 1 到 2 句" in JSON_CONTRACT
+    assert "2 到 4 句" in JSON_CONTRACT
     assert "对话现场" in JSON_CONTRACT
+
+
+# -- 人格注入 ---------------------------------------------------------------
+
+PERSONA = "我是爱丽丝，说话又快又刺，喜欢先拆台再夸人。"
+
+
+def test_system_prompt_replaces_the_neutral_opener_with_the_persona() -> None:
+    #: 追加是不够的 —— 「冷静、克制的观察者」留在第一行时模型会拿它当主身份，
+    #: 于是两个完全不同的人格写出来的文案看不出区别。所以整句必须被换掉。
+    text = build_system_prompt(PERSONA)
+    assert PERSONA in text
+    assert "冷静、克制的观察者" not in text
+
+
+def test_system_prompt_without_persona_keeps_the_neutral_opener() -> None:
+    assert "冷静、克制的观察者" in build_system_prompt()
+
+
+def test_user_prompt_states_the_persona_at_both_ends() -> None:
+    #: 提示很长，模型读完输出契约会被带回「标准助手」的语气，所以首尾各压一遍。
+    spec = PromptSpec("portrait", "棱镜画像", "人格画像", "请分析这个人")
+    text = build_user_prompt(spec, _bundle(), target_name="阿狸", persona_note=PERSONA)
+    assert text.count(PERSONA) >= 2
+    head, _, tail = text.partition(JSON_CONTRACT)
+    assert PERSONA in head
+    assert PERSONA in tail
+
+
+def test_user_prompt_persona_tail_comes_after_the_output_contract() -> None:
+    spec = PromptSpec("portrait", "棱镜画像", "人格画像", "请分析这个人")
+    text = build_user_prompt(spec, _bundle(), target_name="阿狸", persona_note=PERSONA)
+    assert text.rindex(PERSONA) > text.index(JSON_CONTRACT)
+
+
+def test_user_prompt_has_no_persona_block_without_a_persona() -> None:
+    spec = PromptSpec("portrait", "棱镜画像", "人格画像", "请分析这个人")
+    text = build_user_prompt(spec, _bundle(), target_name="阿狸")
+    assert "身份复读" not in text
+
+
+def test_persona_tail_keeps_format_rules_above_personality() -> None:
+    #: 人格可以改写语气，但不许改写输出格式，否则解析直接崩。
+    tail = persona_tail(PERSONA)
+    assert "严格按上面的输出格式交付" in tail
+    assert "第一人称" in tail
+
+
+def test_persona_tail_is_blank_without_a_persona() -> None:
+    assert persona_tail("") == ""
+    assert persona_tail("   ") == ""
+
+
+def test_json_contract_asks_for_a_type_code() -> None:
+    assert "type_code" in JSON_CONTRACT
+    assert "16 型人格" in JSON_CONTRACT

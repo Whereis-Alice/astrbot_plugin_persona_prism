@@ -509,6 +509,10 @@ class CardContext:
     font_name: str = ""
     #: 专属头衔：显示在名字下方的一枚称号徽章。留空则不渲染。
     title_badge: str = ""
+    #: 人格类型徽章，形如 "INTP · 逻辑学家"。留空则不渲染。
+    type_label: str = ""
+    #: 执笔人格名。非空时在顶部信息条里署一笔，让人一眼看出这张卡是谁写的。
+    persona_name: str = ""
 
 
 @dataclass(slots=True)
@@ -724,6 +728,31 @@ body {
 }
 .title-badge .tb-note::before { content: "（"; }
 .title-badge .tb-note::after { content: "）"; }
+/* 头衔与人格徽章并排。两者都可能缺席，缺席时容器里就空着，不留空行高度。 */
+.badges { display: flex; flex-wrap: wrap; align-items: center; }
+/* 人格类型徽章：左格是四字母代号，右格是中文别名，中间一道竖线。
+   刻意做成「铭牌 + 铭文」的两段式，跟头衔奖带区分开，不至于看成同一枚东西。 */
+.type-tag {
+  display: inline-flex; align-items: stretch;
+  margin: 16px 0 0 12px; max-width: calc(100% - 24px);
+  border-radius: 6px; overflow: hidden;
+  border: var(--block-border);
+  background: var(--block-bg);
+  font-family: var(--font-title); line-height: 1;
+}
+.type-tag .tt-code {
+  display: flex; align-items: center;
+  padding: 9px 12px;
+  font-size: 15px; font-weight: 800; letter-spacing: .12em;
+  color: var(--accent);
+  border-right: var(--block-border);
+}
+.type-tag .tt-name {
+  display: flex; align-items: center;
+  padding: 9px 13px;
+  font-size: 14px; font-weight: 700;
+  color: var(--ink-strong); word-break: break-all;
+}
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .chip {
   font-size: 12px; padding: 4px 11px; border-radius: 999px;
@@ -1581,6 +1610,8 @@ def _chip_texts(ctx: CardContext) -> list[str]:
         chips.append(f"读了 {ctx.sample_size} 句发言")
     if ctx.span_days >= 0.05:
         chips.append("当天" if ctx.span_days < 1 else f"近 {round(ctx.span_days)} 天")
+    if ctx.persona_name:
+        chips.append(f"执笔 · {ctx.persona_name}")
     chips.append(time.strftime("%Y-%m-%d %H:%M", time.localtime(ctx.created_at)))
     return chips
 
@@ -1607,6 +1638,32 @@ def _title_badge_html(ctx: CardContext, badge: str) -> str:
     return f'<span class="title-badge">{inner}</span>'
 
 
+def _type_tag_html(ctx: CardContext) -> str:
+    """把 "INTP · 逻辑学家" 渲染成一枚两段式铭牌。空串返回空串。"""
+    text = (ctx.type_label or "").strip()
+    if not text:
+        return ""
+    code, _, name = text.partition(" \u00b7 ")
+    code = code.strip()
+    name = name.strip()
+    # 左格只放类型代号（INTP 这种）。拿到的不是干净代号就整枚不渲染 ——
+    # 卡片上宁可少一枚徽章，也不要出现半截空壳或者被塞进标记的铭牌。
+    if not code or not code.isascii() or not code.isalnum() or len(code) > 8:
+        return ""
+    inner = f'<span class="tt-code">{_esc(code)}</span>'
+    if name:
+        inner += f'<span class="tt-name">{_esc(name)}</span>'
+    return f'<span class="type-tag">{inner}</span>'
+
+
+def _badges_html(ctx: CardContext, badge: str) -> str:
+    """头衔 + 人格徽章那一行。两枚都没有就整行不渲染。"""
+    inner = _title_badge_html(ctx, badge) + _type_tag_html(ctx)
+    if not inner:
+        return ""
+    return f'<div class="badges">{inner}</div>'
+
+
 def _hero_html(ctx: CardContext, badge: str = "") -> str:
     parts: list[str] = ['<div class="hero">']
     if ctx.show_avatar:
@@ -1619,7 +1676,7 @@ def _hero_html(ctx: CardContext, badge: str = "") -> str:
         '<div class="who">'
         f'<div class="kicker">{_esc(ctx.kind_label)}</div>'
         f"<h1>{_esc(ctx.target_name or ctx.target_id or '匿名群友')}</h1>"
-        f"{_title_badge_html(ctx, badge)}"
+        f"{_badges_html(ctx, badge)}"
         f'<div class="chips">{chips}</div>'
         "</div>",
     )

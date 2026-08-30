@@ -94,10 +94,20 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "max_scenes": 12,
         "max_lines": 80,
         "social_signals": True,
+        # 让模型自己从带编号的群聊里挑出「哪几句构成一场对话」。群聊不是一问一答，
+        # 纯靠时间和条数切窗口切不准；交给读得懂语义的模型挑，我们再按编号回库取原文。
+        "llm_chain": True,
+        "llm_chain_scenes": 5,
+    },
+    "profile": {
+        # 16 型人格徽章：off 关闭 / mbti 官方译名 / sbti 玩梗版 / acgti 二次元版。
+        "type_tag": "mbti",
     },
     "persona": {
-        # 可选：借用 AstrBot 当前会话的人格来决定文案口吻（不影响结论与格式）。
-        "use_astrbot_persona": False,
+        # 借用 AstrBot 当前会话的人格来决定文案口吻（不影响结论与格式）。
+        # 默认开：装了插件的人基本都给 bot 配了人格，让画像带上 bot 自己的口吻
+        # 比一份中立报告有意思得多；不想要的可以在 WebUI 里关掉。
+        "use_astrbot_persona": True,
         "persona_id": "",
         # 可选：允许其他插件的 @filter.on_llm_request 钩子（如世界树词条）往
         # 分析请求里补充设定。会稀释「只依据语料」的约束，所以默认关闭。
@@ -170,6 +180,9 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "dialogue.max_scenes",
         "dialogue.max_lines",
         "dialogue.social_signals",
+        "dialogue.llm_chain",
+        "dialogue.llm_chain_scenes",
+        "profile.type_tag",
         "persona.use_astrbot_persona",
         "persona.persona_id",
         "persona.allow_llm_hooks",
@@ -192,6 +205,8 @@ VALID_THEME_CHOICES = ("auto", *VALID_THEMES)
 VALID_LOVE_THEMES = ("sakura", "moonlit", "dusk", "berry")
 VALID_LOVE_THEME_CHOICES = ("auto", *VALID_LOVE_THEMES)
 VALID_BACKENDS = ("auto", "local_first", "t2i_only", "text_only")
+#: 16 型人格徽章的命名档位，见 prism.typetags。
+VALID_TYPE_TAGS = ("off", "mbti", "sbti", "acgti")
 VALID_SAMPLING = ("layered", "recent")
 VALID_IMAGE_FORMATS = ("jpeg", "png")
 #: 翻群历史时用哪种翻页方式。名字含义 = 读哪个字段 + 取这一页的哪一端，
@@ -216,12 +231,14 @@ _ENUMS: dict[str, tuple[str, ...]] = {
     "collect.sampling": VALID_SAMPLING,
     "collect.cursor_field": VALID_CURSOR_FIELDS,
     "love.theme": VALID_LOVE_THEME_CHOICES,
+    "profile.type_tag": VALID_TYPE_TAGS,
 }
 
 _RANGES: dict[str, tuple[int, int]] = {
     "dialogue.context_span": (0, 8),
     "dialogue.max_scenes": (1, 40),
     "dialogue.max_lines": (10, 300),
+    "dialogue.llm_chain_scenes": (1, 12),
     "llm.retry_times": (0, 5),
     "collect.backfill_rounds": (0, 60),
     "collect.page_size": (20, 200),

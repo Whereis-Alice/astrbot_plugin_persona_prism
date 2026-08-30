@@ -15,10 +15,12 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
+from . import chain, typetags
 from .models import CorpusBundle, MemberProfile, Portrait
-from .persona_link import apply_llm_hooks, resolve_persona
+from .persona_link import PersonaInfo, apply_llm_hooks, resolve_persona
 from .prompts import PromptSpec, build_system_prompt, build_user_prompt
 from .titles import fallback_title, normalize_title
 
@@ -262,6 +264,9 @@ def build_portrait(
     for dim in portrait.dimensions:
         dim.score = max(0, min(100, int(dim.score)))
 
+    # 16 型人格代码：不是那 16 个合法组合就直接丢掉，卡片上宁可不显示也别显示假的。
+    portrait.type_code = typetags.normalize_code(portrait.type_code)
+
     # 专属头衔：模型给的先洗一遍（剥前缀、限长、判跑偏），洗不出来就按玩法兜一枚。
     portrait.title = normalize_title(portrait.title)
     if not portrait.title and title_fallback:
@@ -353,29 +358,98 @@ class PrismAnalyzer:
         return provider
 
     # -- AstrBot 人格 ------------------------------------------------------
-    async def persona_note(self, umo: str = "") -> str:
-        """可选：取当前会话人格，作为文案口吻提示。默认关闭。
+    async def persona_info(self, umo: str = "") -> PersonaInfo:
+        """可选：取当前会话正在用的人格。开关没开或解析不到就返回空的 PersonaInfo。
 
         这里刻意留了 info 级日志：口吻生效与否在卡片上很难肉眼分辨，出问题时
         先看一眼日志就能分清「开关没开」「人格没解析到」和「模型没照做」。
         """
         if not self._config.bool_of("persona.use_astrbot_persona"):
-            return ""
+            if self._logger:
+                self._logger.debug("[人格棱镜] 人格接入开关未打开，本次用中立口吻。")
+            return PersonaInfo()
         info = await resolve_persona(
             self._context,
             umo=umo,
             persona_id=self._config.str_of("persona.persona_id"),
             logger=self._logger,
         )
-        block = info.to_prompt_block()
-        if block and self._logger:
+        if info.usable and self._logger:
             self._logger.info(
                 "[人格棱镜] 本次文案套用人格「%s」（来源：%s，设定 %s 字）。",
                 info.name or "未命名",
                 info.origin or "未知",
                 len(info.prompt),
             )
-        return block
+        return info
+
+    async def persona_note(self, umo: str = "") -> str:
+        """人格的提示词块。空串表示这次不套人格。"""
+        return (await self.persona_info(umo)).to_prompt_block()
+
+    # -- 对话链 ------------------------------------------------------------
+    async def pick_dialogue_chain(
+        self,
+        ordered: Sequence[dict[str, Any]],
+        target_id: str,
+        *,
+        target_name: str = "",
+        umo: str = "",
+        self_id: str = "",
+        names: dict[str, str] | None = None,
+        max_scenes: int = 5,
+    ) -> list[chain.ChainScene]:
+        """让模型从候选群聊里圈出几场成形的对话，返回场次（可能为空）。
+
+        这是一次很小的附加调用：输入是编号成绩单，输出只有编号分组，所以又快又
+        便宜。任何异常都吞掉返回空列表 —— 上层会自动回落本地切法。
+        """
+        if not ordered or not target_id:
+            return []
+        indices = chain.candidate_indices(ordered, target_id)
+        if len(indices) < chain.SCENE_MIN_LINES:
+            return []
+        sheet, numbers = chain.build_sheet(
+            ordered,
+            indices,
+            target_id,
+            names=names,
+            self_id=self_id,
+        )
+        if not numbers:
+            return []
+        prompt = chain.build_prompt(sheet, target_name=target_name, max_scenes=max_scenes)
+        timeout = max(20, self._config.int_of("llm.timeout_sec") // 2)
+        try:
+            provider = self.resolve_provider(umo)
+            async with self._semaphore:
+                text = await asyncio.wait_for(
+                    self._call(provider, chain.CHAIN_SYSTEM, prompt, self._config.str_of("llm.model")),
+                    timeout=timeout,
+                )
+        except Exception as exc:  # 挑对话失败不该影响出卡
+            if self._logger:
+                self._logger.info("[人格棱镜] 对话链提取失败（%s），回落本地切法。", exc)
+            return []
+        picked = chain.parse_chain(
+            text,
+            numbers,
+            ordered,
+            target_id,
+            max_scenes=max_scenes,
+        )
+        if self._logger:
+            if picked:
+                self._logger.info(
+                    "[人格棱镜] 对话链提取成功：%s 场 / 共 %s 行（候选 %s 行）。理由：%s",
+                    len(picked),
+                    sum(len(s.indices) for s in picked),
+                    len(numbers),
+                    "；".join(s.why for s in picked if s.why) or "未给出",
+                )
+            else:
+                self._logger.info("[人格棱镜] 对话链提取没挑出合格场次，回落本地切法。")
+        return picked
 
     # -- 主流程 ------------------------------------------------------------
     async def analyze(
@@ -396,7 +470,8 @@ class PrismAnalyzer:
     ) -> tuple[Portrait, str]:
         """执行一次分析，返回 (画像, 模型名)。"""
         provider = self.resolve_provider(umo)
-        persona_note = await self.persona_note(umo)
+        persona = await self.persona_info(umo)
+        persona_note = persona.to_prompt_block()
         #: 口吻要同时写进系统提示，否则会被系统提示开头那句「冷静、克制的观察者」压掉，
         #: 表现为「开了人格但文案还是中性报告」。
         system_prompt = build_system_prompt(persona_note=persona_note)
@@ -452,16 +527,15 @@ class PrismAnalyzer:
                     last_error = AnalyzeError("模型返回了空内容。")
                     continue
                 if not spec.structured:
-                    return (
-                        plain_portrait(
-                            last_text,
-                            kind=spec.key,
-                            confidence=0.6,
-                            seed=seed,
-                            title_fallback=title_fallback,
-                        ),
-                        model,
+                    plain = plain_portrait(
+                        last_text,
+                        kind=spec.key,
+                        confidence=0.6,
+                        seed=seed,
+                        title_fallback=title_fallback,
                     )
+                    plain.persona = persona.name if persona.usable else ""
+                    return plain, model
                 repair_report: list[str] = []
                 payload = parse_portrait_payload(last_text, repair_report)
                 if payload and repair_report and repair_report[0] != "strict" and self._logger:
@@ -480,6 +554,7 @@ class PrismAnalyzer:
                         title_fallback=title_fallback,
                     )
                     if portrait.headline or portrait.sections:
+                        portrait.persona = persona.name if persona.usable else ""
                         return portrait, model
                 last_error = AnalyzeError("模型没有按约定输出 JSON。")
                 if self._logger:
@@ -491,7 +566,11 @@ class PrismAnalyzer:
 
         if last_text.strip():
             # 内容是有的，只是格式不对。宁可少一张雷达图，也别让用户白等。
-            return plain_portrait(last_text, kind=spec.key, seed=seed, title_fallback=title_fallback), model
+            salvaged = plain_portrait(
+                last_text, kind=spec.key, seed=seed, title_fallback=title_fallback
+            )
+            salvaged.persona = persona.name if persona.usable else ""
+            return salvaged, model
         raise AnalyzeError(str(last_error) if last_error else "分析失败，未知原因。")
 
     async def _call(

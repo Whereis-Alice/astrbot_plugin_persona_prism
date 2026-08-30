@@ -534,6 +534,42 @@
         "type": "bool",
         "default": true,
         "hint": "把「谁接了 TA 的话、TA 接了谁的话、被 @ 了几次」这类本地精确计数告诉模型，用来判断社交位置，比让模型自己猜可靠得多。"
+      },
+      "llm_chain": {
+        "description": "让模型挑出成场的对话",
+        "type": "bool",
+        "default": true,
+        "hint": "群聊很少一问一答秒回，靠时间间隔和条数切窗口经常把不相关的话切在一起。开启后会额外发一次很小的模型请求，把带编号的群聊给模型看，让它圈出「哪几句属于同一场对话」，我们再按编号回本地记录取原文——引用的每句话仍然逐字来自聊天记录，只是分段更准。失败时自动退回本地切法，不影响出卡。"
+      },
+      "llm_chain_scenes": {
+        "description": "最多挑几场对话",
+        "type": "int",
+        "default": 5,
+        "hint": "仅在上面的开关打开时有效。场数越多卡片越长，5 场通常够看出说话风格。"
+      }
+    }
+  },
+  "profile": {
+    "description": "人格徽章",
+    "type": "object",
+    "items": {
+      "type_tag": {
+        "description": "16 型人格徽章",
+        "type": "string",
+        "default": "mbti",
+        "options": [
+          "off",
+          "mbti",
+          "sbti",
+          "acgti"
+        ],
+        "labels": [
+          "不显示",
+          "官方译名（INTP · 逻辑学家）",
+          "玩梗版（INTP · 民间科学家）",
+          "二次元版（INTP · 图书室的考据党）"
+        ],
+        "hint": "在卡片头衔旁加一枚四字母人格代号，由模型依据语料判断。玩梗版和二次元版换的只是称号译名，代号本身一致。判断不出来时自动不显示。"
       }
     }
   },
@@ -544,7 +580,7 @@
       "use_astrbot_persona": {
         "description": "用当前人格的口吻写文案",
         "type": "bool",
-        "default": false,
+        "default": true,
         "hint": "开启后所有玩法的文案会照着 AstrBot 当前会话正在用的人格来写（语气、用词、自称）。只影响措辞，不影响评分、结论和卡片格式。会话里显式关掉人格时自动跳过。"
       },
       "persona_id": {

@@ -288,6 +288,9 @@ class Evidence:
     reason: str = ""
     title: str = ""
     dialogue: list[Utterance] = field(default_factory=list)
+    #: 这段现场是否已经跟本地记录逐条对上了。False 表示气泡里还有模型自己写的行，
+    #: 卡片会把它降级成单条引用 —— 宁可少几个气泡，也不让模型代笔别人的台词。
+    verified: bool = False
 
     def scene_lines(self, speaker_name: str = "") -> list[Utterance]:
         """拿到用于渲染气泡的对话序列；没有 dialogue 时用 quote 合成一条。"""
@@ -335,6 +338,10 @@ class Portrait:
     equation: str = ""
     glossary: list[Term] = field(default_factory=list)
     sample_note: str = ""
+    #: 模型自评的 16 型人格代码（四个大写字母）。空串表示没给或关了这个开关。
+    type_code: str = ""
+    #: 本次文案套用的 AstrBot 人格名。只用于在卡片上标一笔「谁在解读」。
+    persona: str = ""
     confidence: float = 0.0
     raw_text: str = ""
     structured: bool = True
@@ -344,6 +351,8 @@ class Portrait:
             "kind": self.kind,
             "headline": self.headline,
             "title": self.title,
+            "type_code": self.type_code,
+            "persona": self.persona,
             "tags": [{"label": t.label, "polarity": t.polarity} for t in self.tags],
             "dimensions": [{"name": d.name, "score": d.score, "note": d.note} for d in self.dimensions],
             "sections": [{"title": s.title, "body": s.body} for s in self.sections],
@@ -352,6 +361,7 @@ class Portrait:
                     "quote": e.quote,
                     "reason": e.reason,
                     "title": e.title,
+                    "verified": e.verified,
                     "dialogue": [u.to_dict() for u in e.dialogue],
                 }
                 for e in self.evidence
@@ -395,6 +405,7 @@ class Portrait:
                     quote=str(e.get("quote") or ""),
                     reason=str(e.get("reason") or ""),
                     title=str(e.get("title") or ""),
+                    verified=bool(e.get("verified")),
                     dialogue=_parse_dialogue(e.get("dialogue")),
                 )
                 for e in data.get("evidence") or []
@@ -413,6 +424,8 @@ class Portrait:
                 if isinstance(t, dict) and t.get("name")
             ],
             sample_note=str(data.get("sample_note") or ""),
+            type_code=str(data.get("type_code") or ""),
+            persona=str(data.get("persona") or ""),
             confidence=float(data.get("confidence") or 0.0),
             raw_text=str(data.get("raw_text") or ""),
             structured=bool(data.get("structured", True)),

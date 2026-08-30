@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
@@ -251,6 +251,22 @@ def _locate_index(
     return -1
 
 
+#: 「这条原话所在的那一场对话」的查询函数：入参 (message_id, ts)，返回那一场的全部行。
+#: 由 main 依据模型圈出的对话链装配（见 chain 模块）；返回空列表表示这条不在任何场次里，
+#: 此时自动退回本模块按静默切轮次的老办法。
+WindowHint = Callable[[str, int], Sequence[dict[str, Any]]]
+
+
+def locate_row_index(
+    rows: Sequence[dict[str, Any]],
+    *,
+    message_id: str = "",
+    center_ts: int = 0,
+) -> int:
+    """在按时间排好的语料里找出某条消息的下标。找不到返回 -1。"""
+    return _locate_index(rows, message_id=message_id, center_ts=center_ts)
+
+
 def slice_around(
     rows: Sequence[dict[str, Any]],
     *,
@@ -355,6 +371,17 @@ def scene_title(ts: int, label: str = "现场片段") -> str:
     return f"{clock} · {label}"
 
 
+def own_quote(item: Evidence) -> str:
+    """这条证供指向的「本人原话」。模型只给了 dialogue 时从里面把本人那句捞出来。"""
+    quote = (item.quote or "").strip()
+    if quote:
+        return quote
+    for line in item.dialogue:
+        if line.mine and real_text(line.text):
+            return line.text.strip()
+    return ""
+
+
 def enrich_evidence(
     item: Evidence,
     messages: Sequence[CorpusMessage],
@@ -366,33 +393,61 @@ def enrich_evidence(
     label: str = "现场片段",
     min_others: int = 1,
     self_id: str = "",
+    force: bool = False,
+    window_hint: WindowHint | None = None,
 ) -> bool:
     """给一条证供补上真实对话。补上了返回 True。
 
     min_others 默认为 1：宁可多翻两条，也要让这段现场看得出是在跟人说话。
+
+    force=True 时连模型自己写的 dialogue 也一起重建 —— 模型转写的气泡没有 uid、
+    没有时刻，卡片上就变成「只有主角有头像、谁都没有时间」的假截图。重建失败会
+    把原来那份原样放回去，不会让证供凭空消失。
     """
-    if item.dialogue:
+    if item.dialogue and not force:
         return False
-    hit = locate_quote(item.quote, messages)
+    stash = list(item.dialogue)
+    # 锚点必须在清空之前取：模型只给了 dialogue 时，本人那句原话就藏在里面，
+    # 先清空再问就永远问不到，整段现场的重建会被白白跳过。
+    needle = own_quote(item)
+    item.dialogue = []
+    hit = locate_quote(needle, messages)
     if hit is None:
+        item.dialogue = stash
         return False
-    window = scene_window(
-        rows,
-        message_id=str(hit.message_id or ""),
-        center_ts=int(hit.ts or 0),
-        user_id=user_id,
-        min_others=min_others,
-        cap=max(SCENE_LIMIT, 2 * max(0, context) + 1),
-    )
+    if not (item.quote or "").strip():
+        # 模型只给了 dialogue 的情况：把定位到的那条真实原话补回 quote，
+        # 后面所有兜底（单气泡、纯文本导出）才有东西可用。
+        item.quote = hit.text
+    window: Sequence[dict[str, Any]] = ()
+    if window_hint is not None:
+        #: 模型圈过对话场次时优先用它：气泡范围与提示词里那段「对话现场」完全一致，
+        #: 不会出现「模型读到的是一整场、卡片上只剩半截」这种割裂。
+        try:
+            window = window_hint(str(hit.message_id or ""), int(hit.ts or 0)) or ()
+        except Exception:
+            window = ()
+    if not window:
+        window = scene_window(
+            rows,
+            message_id=str(hit.message_id or ""),
+            center_ts=int(hit.ts or 0),
+            user_id=user_id,
+            min_others=min_others,
+            cap=max(SCENE_LIMIT, 2 * max(0, context) + 1),
+        )
     dialogue = rows_to_utterances(window, user_id, names=names, self_id=self_id)
     if not any(line.mine for line in dialogue):
         # 没定位到本人那句就别硬拼，交给 Evidence.scene_lines 用 quote 兜底。
+        item.dialogue = stash
         return False
     picked = center_scene(dialogue, SCENE_LIMIT)
     if not scene_has_substance(picked):
         # 整段都是表情包/图片，拼出来也读不出东西，退回单气泡。
+        item.dialogue = stash
         return False
     item.dialogue = picked
+    item.verified = True
     if not item.title:
         item.title = scene_title(int(hit.ts or 0), label)
     return True
@@ -409,6 +464,8 @@ def enrich_all(
     label: str = "现场片段",
     min_others: int = 1,
     self_id: str = "",
+    force: bool = False,
+    window_hint: WindowHint | None = None,
 ) -> int:
     """批量补全，返回成功补上对话的条数。"""
     filled = 0
@@ -423,6 +480,137 @@ def enrich_all(
             label=label,
             min_others=min_others,
             self_id=self_id,
+            force=force,
+            window_hint=window_hint,
         ):
             filled += 1
     return filled
+
+
+def _row_utterance(
+    row: dict[str, Any],
+    user_id: str,
+    *,
+    names: dict[str, str] | None = None,
+    self_id: str = "",
+) -> Utterance | None:
+    """单行语料渲染成一个气泡。纯图片行返回 None。"""
+    made = rows_to_utterances([row], user_id, names=names, self_id=self_id)
+    return made[0] if made else None
+
+
+def rebind_dialogue(
+    item: Evidence,
+    rows: Sequence[dict[str, Any]],
+    *,
+    user_id: str,
+    names: dict[str, str] | None = None,
+    self_id: str = "",
+) -> bool:
+    """把模型写出来的每一句对回本地记录里的那条消息。全对上了返回 True。"""
+
+    # 用途：整段窗口重建失败时的第二道兜底。模型挑的这几句可能确实存在（只是
+    # 定位不到连续窗口），逐句对回数据库后，昵称、uid、时刻就都是真的了 ——
+    # 卡片上每个人都有头像、每句都有时间，也仍然一个字都不是模型写的。
+    if not item.dialogue:
+        return False
+    index: list[tuple[str, dict[str, Any]]] = []
+    for row in rows:
+        text = _norm(real_text(row.get("text") or ""))
+        if text:
+            index.append((text, row))
+    if not index:
+        return False
+    used: set[str] = set()
+    picked: list[tuple[int, Utterance]] = []
+    for line in item.dialogue:
+        needle = _norm(real_text(line.text))
+        if not needle:
+            continue
+        best: dict[str, Any] | None = None
+        best_score = 0.0
+        for hay, row in index:
+            key = str(row.get("message_id") or "") or "{}:{}".format(
+                row.get("ts"), row.get("user_id")
+            )
+            if key in used:
+                continue
+            if hay == needle:
+                score = 1.0
+            elif needle in hay:
+                score = 0.75 + 0.25 * (len(needle) / len(hay))
+            elif hay in needle:
+                score = 0.70 + 0.25 * (len(hay) / len(needle))
+            else:
+                score = SequenceMatcher(None, needle, hay).ratio()
+            if score > best_score:
+                best, best_score = row, score
+        if best is None or best_score < MATCH_FLOOR:
+            continue
+        made = _row_utterance(best, user_id, names=names, self_id=self_id)
+        if made is None:
+            continue
+        used.add(
+            str(best.get("message_id") or "")
+            or "{}:{}".format(best.get("ts"), best.get("user_id"))
+        )
+        picked.append((int(best.get("ts") or 0), made))
+    if not picked:
+        return False
+    picked.sort(key=lambda pair: pair[0])
+    lines = [line for _, line in picked]
+    if not any(line.mine for line in lines):
+        return False
+    if not scene_has_substance(lines):
+        return False
+    item.dialogue = center_scene(lines, SCENE_LIMIT)
+    item.verified = True
+    return True
+
+
+def harden_all(
+    items: Sequence[Evidence],
+    messages: Sequence[CorpusMessage],
+    rows: Sequence[dict[str, Any]],
+    *,
+    user_id: str,
+    names: dict[str, str] | None = None,
+    context: int = 1,
+    label: str = "现场片段",
+    min_others: int = 1,
+    self_id: str = "",
+    window_hint: WindowHint | None = None,
+) -> tuple[int, int]:
+    """让每一条证供的气泡都来自本地记录，返回 (还原成功数, 被降级数)。"""
+
+    # 三级处理，越靠前越好看：
+    # 1. 按原话定位，重建那一刻前后的完整现场（有别人、有时刻、有头像）；
+    # 2. 定位不到窗口时，逐句对回数据库（气泡少一些，但每句仍是真的）；
+    # 3. 两条都失败 —— 丢掉模型写的那份对话，只留一条本人原话的引用。
+    filled = 0
+    downgraded = 0
+    for item in items:
+        if enrich_evidence(
+            item,
+            messages,
+            rows,
+            user_id=user_id,
+            names=names,
+            context=context,
+            label=label,
+            min_others=min_others,
+            self_id=self_id,
+            force=True,
+            window_hint=window_hint,
+        ):
+            filled += 1
+            continue
+        if rebind_dialogue(item, rows, user_id=user_id, names=names, self_id=self_id):
+            filled += 1
+            continue
+        if item.dialogue and not item.verified:
+            if not (item.quote or "").strip():
+                item.quote = own_quote(item)
+            item.dialogue = []
+            downgraded += 1
+    return filled, downgraded

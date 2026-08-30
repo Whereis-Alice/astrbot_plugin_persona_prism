@@ -6,7 +6,14 @@ import sqlite3
 
 import pytest
 from astrbot_plugin_persona_prism.prism import love
-from astrbot_plugin_persona_prism.prism.models import CorpusMessage, Evidence, Portrait, Section, Tag
+from astrbot_plugin_persona_prism.prism.models import (
+    CorpusMessage,
+    Evidence,
+    Portrait,
+    Section,
+    Tag,
+    Utterance,
+)
 from astrbot_plugin_persona_prism.prism.store import PrismStore
 
 PLATFORM = "aiocqhttp"
@@ -587,11 +594,24 @@ def test_merge_portrait_uses_local_scenes_when_model_gives_none() -> None:
     assert card.sample_note == "样本说明"
 
 
-def test_merge_portrait_keeps_model_evidence_over_local_scenes() -> None:
+def test_merge_portrait_keeps_verified_model_evidence_over_local_scenes() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=8))
+    picked = Evidence(
+        quote="模型挑的那句",
+        dialogue=[Utterance(speaker="阿狸", text="模型挑的那句", mine=True)],
+        verified=True,
+    )
+    llm = Portrait(evidence=[picked], structured=True)
+    card = love.merge_portrait(metrics, llm, scenes=[Evidence(quote="本地裁的")])
+    assert card.evidence[0].quote == "模型挑的那句"
+
+
+def test_merge_portrait_drops_unverified_model_evidence() -> None:
+    """模型自己编的气泡对不回本地记录时不能上卡——那种条目没有头像也没有时刻。"""
     metrics = love.compute_metrics(love.LoveInputs(msg_sent=8))
     llm = Portrait(evidence=[Evidence(quote="模型挑的那句")], structured=True)
     card = love.merge_portrait(metrics, llm, scenes=[Evidence(quote="本地裁的")])
-    assert [e.quote for e in card.evidence] == ["模型挑的那句"]
+    assert [e.quote for e in card.evidence] == ["本地裁的"]
 
 # -- 持久层 -----------------------------------------------------------------
 
@@ -758,3 +778,26 @@ def test_merge_portrait_keeps_formula_title_for_unstructured_model_output() -> N
     metrics = love.compute_metrics(love.LoveInputs(msg_sent=10))
     card = love.merge_portrait(metrics, Portrait(structured=False, raw_text="上头"), seed="s")
     assert card.title == love.fallback_portrait(metrics, seed="s").title
+
+
+def test_merge_portrait_carries_the_persona_and_type_code() -> None:
+    # 恋爱卡的署名与人格徽章只能从模型那边来，公式版给不出，丢了卡片上就是空的。
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=10))
+    llm = Portrait(structured=True, headline="上头了", persona="爱丽丝", type_code="ENTP")
+    card = love.merge_portrait(metrics, llm, seed="s")
+    assert card.persona == "爱丽丝"
+    assert card.type_code == "ENTP"
+
+
+def test_persona_survives_unstructured_model_output() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=10))
+    llm = Portrait(structured=False, raw_text="上头", persona="爱丽丝", type_code="INFP")
+    card = love.merge_portrait(metrics, llm, seed="s")
+    assert (card.persona, card.type_code) == ("爱丽丝", "INFP")
+
+
+def test_formula_only_card_has_no_persona() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=10))
+    card = love.merge_portrait(metrics, None, seed="s")
+    assert card.persona == ""
+    assert card.type_code == ""

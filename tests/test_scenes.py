@@ -289,3 +289,161 @@ class TestSceneHasSubstance:
         lines = [self._u("嗯", mine=True), self._u("好")]
         assert scenes.scene_has_substance(lines, own_floor=1, total_floor=2) is True
         assert scenes.scene_has_substance(lines, own_floor=1, total_floor=99) is False
+
+
+class TestLocateRowIndex:
+    def test_finds_the_row_by_message_id(self):
+        rows = [_row(str(i), ME, f"t{i}", 100 + i) for i in range(4)]
+        assert scenes.locate_row_index(rows, message_id="2") == 2
+
+    def test_message_id_wins_over_timestamp(self):
+        rows = [_row(str(i), ME, f"t{i}", 100 + i * 10) for i in range(4)]
+        # 时间上离 "0" 最近，但 ID 命中的是 "3"：ID 是硬证据，优先。
+        assert scenes.locate_row_index(rows, message_id="3", center_ts=100) == 3
+
+    def test_unknown_id_falls_back_to_nearest_timestamp(self):
+        rows = [_row(str(i), ME, f"t{i}", 100 + i * 10) for i in range(4)]
+        assert scenes.locate_row_index(rows, message_id="nope", center_ts=119) == 2
+
+    def test_nothing_to_go_on_returns_minus_one(self):
+        rows = [_row("1", ME, "x", 100)]
+        assert scenes.locate_row_index(rows, message_id="", center_ts=0) == -1
+        assert scenes.locate_row_index([], message_id="1") == -1
+
+
+class TestWindowHint:
+    """模型圈过对话场次时，卡片气泡要跟提示词里那段现场取同一批行。"""
+
+    def _fixture(self):
+        rows = [
+            _row("1", "2002", "上一轮的闲聊", 1000),
+            _row("2", "2003", "你周末有空吗", 1010),
+            _row("3", ME, "去啊，零件都买好了", 1020),
+            _row("4", "2003", "那就星期六", 1030),
+            _row("5", "2004", "带我一个", 1040),
+            _row("6", "2002", "同上", 1050),
+        ]
+        msgs = [_msg("3", "去啊，零件都买好了", 1020)]
+        return rows, msgs
+
+    def test_hint_decides_the_bubble_range(self):
+        rows, msgs = self._fixture()
+        scene = [rows[1], rows[2], rows[3]]
+        item = Evidence(quote="去啊，零件都买好了")
+        ok = scenes.enrich_evidence(
+            item, msgs, rows, user_id=ME, window_hint=lambda mid, ts: scene
+        )
+        assert ok is True
+        assert [u.text for u in item.dialogue] == ["你周末有空吗", "去啊，零件都买好了", "那就星期六"]
+
+    def test_hint_receives_the_anchor_it_should_look_up(self):
+        rows, msgs = self._fixture()
+        seen: list[tuple[str, int]] = []
+
+        def hint(message_id: str, ts: int):
+            seen.append((message_id, ts))
+            return [rows[2], rows[3]]
+
+        item = Evidence(quote="去啊，零件都买好了")
+        assert scenes.enrich_evidence(item, msgs, rows, user_id=ME, window_hint=hint) is True
+        assert seen == [("3", 1020)]
+
+    def test_empty_hint_falls_back_to_the_local_turn(self):
+        rows, msgs = self._fixture()
+        item = Evidence(quote="去啊，零件都买好了")
+        ok = scenes.enrich_evidence(item, msgs, rows, user_id=ME, window_hint=lambda mid, ts: [])
+        assert ok is True
+        assert len(item.dialogue) == len(rows)
+
+    def test_a_broken_hint_never_breaks_the_card(self):
+        rows, msgs = self._fixture()
+
+        def boom(message_id: str, ts: int):
+            raise RuntimeError("取景出错了")
+
+        item = Evidence(quote="去啊，零件都买好了")
+        assert scenes.enrich_evidence(item, msgs, rows, user_id=ME, window_hint=boom) is True
+        assert len(item.dialogue) == len(rows)
+
+
+class TestHardenAll:
+    """三级兜底：重建整场 → 逐句对回 → 只留一句引用。"""
+
+    @staticmethod
+    def _written(text: str, mine: bool = False) -> Utterance:
+        # 模型自己转写的气泡：没有 uid、没有时刻，上卡就是「只有主角有头像」。
+        return Utterance(speaker="某人", text=text, mine=mine)
+
+    def test_rebuilds_the_whole_scene_from_the_local_record(self):
+        rows = [
+            _row("10", "2002", "这周还去修风车吗", 1000),
+            _row("11", ME, "去啊，零件都买好了", 1010),
+            _row("12", "2003", "带我一个", 1020),
+        ]
+        msgs = [_msg("11", "去啊，零件都买好了", 1010)]
+        item = Evidence(
+            reason="行动力",
+            dialogue=[self._written("去啊，零件都买好了", mine=True)],
+        )
+        filled, downgraded = scenes.harden_all([item], msgs, rows, user_id=ME)
+        assert (filled, downgraded) == (1, 0)
+        assert item.verified is True
+        assert [u.text for u in item.dialogue] == [
+            "这周还去修风车吗",
+            "去啊，零件都买好了",
+            "带我一个",
+        ]
+        # 每个气泡都拿到了真实 uid 和时刻，卡片上才人人有头像。
+        assert all(u.user_id for u in item.dialogue)
+        assert all(u.clock for u in item.dialogue)
+        # 定位到的那条真实原话补回了 quote，纯文本兜底才有东西可用。
+        assert item.quote == "去啊，零件都买好了"
+
+    def test_falls_back_to_matching_line_by_line(self):
+        # 语料索引里定位不到锚点（messages 为空），但这几句确实在库里。
+        rows = [
+            _row("10", "2002", "今天开不开会", 1000),
+            _row("11", ME, "我这边随时", 1010),
+        ]
+        item = Evidence(
+            dialogue=[
+                self._written("今天开不开会"),
+                self._written("我这边随时", mine=True),
+            ]
+        )
+        filled, downgraded = scenes.harden_all([item], [], rows, user_id=ME)
+        assert (filled, downgraded) == (1, 0)
+        assert item.verified is True
+        assert [u.speaker for u in item.dialogue] == ["U2002", "U1001"]
+        assert all(u.clock for u in item.dialogue)
+
+    def test_unverifiable_dialogue_is_dropped_not_faked(self):
+        rows = [_row("10", "2002", "完全不相干的一句话在这里", 1000)]
+        item = Evidence(dialogue=[self._written("模型自己编的那句话", mine=True)])
+        filled, downgraded = scenes.harden_all([item], [], rows, user_id=ME)
+        assert (filled, downgraded) == (0, 1)
+        assert item.dialogue == []
+        assert item.verified is False
+        # 气泡没了，至少把本人那句话留成引用。
+        assert item.quote == "模型自己编的那句话"
+
+    def test_hint_is_honoured_here_too(self):
+        rows = [
+            _row("10", "2002", "这周还去修风车吗", 1000),
+            _row("11", ME, "去啊，零件都买好了", 1010),
+            _row("12", "2003", "带我一个", 1020),
+        ]
+        msgs = [_msg("11", "去啊，零件都买好了", 1010)]
+        item = Evidence(quote="去啊，零件都买好了")
+        filled, _ = scenes.harden_all(
+            [item],
+            msgs,
+            rows,
+            user_id=ME,
+            window_hint=lambda mid, ts: [rows[0], rows[1]],
+        )
+        assert filled == 1
+        assert [u.text for u in item.dialogue] == ["这周还去修风车吗", "去啊，零件都买好了"]
+
+    def test_empty_list_is_a_no_op(self):
+        assert scenes.harden_all([], [], [], user_id=ME) == (0, 0)

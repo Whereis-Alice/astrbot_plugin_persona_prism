@@ -44,29 +44,36 @@ class PersonaInfo:
         return bool(self.prompt.strip())
 
     def to_prompt_block(self) -> str:
-        """渲染成「叙述口吻」段落。"""
+        """渲染成一段「你是谁」。怎么用它（开场替换、收尾复读）由 prompts 模块决定。"""
         if not self.usable:
             return ""
         body = self.prompt.strip()
         if len(body) > PERSONA_LIMIT:
             body = body[:PERSONA_LIMIT].rstrip() + "……"
         who = self.name or "你"
-        return (
-            f"这次的全部文案（头衔、判词、小节正文、建议）都要由「{who}」本人写出来，"
-            "用 TA 的语气、用词习惯、自称和口癖，读起来要像 TA 在点评，而不是一份中立报告。\n"
-            "同时守住三条：结论与评分只能来自语料，输出字段和格式一个都不能少，"
-            "不要在文案里自我介绍、不要写成对话、也不要提到「人格」这两个字。\n"
-            f"「{who}」的设定：\n{body}"
-        )
+        return f"你是「{who}」。\n{body}"
+
+
+#: 同一个字段在 AstrBot 的两套人格模型里名字不一样，两边都得试：
+#: - `Personality`（TypedDict，get_persona_v3_by_id 返回）：name / prompt
+#: - `Persona`（SQLModel，get_persona 返回）：persona_id / system_prompt
+#: 早期只读了前一套，命中后一套时人格设定拿到的是空串，表现为「开了开关也没效果」。
+_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "name": ("name", "persona_id", "id"),
+    "prompt": ("prompt", "system_prompt", "content"),
+}
 
 
 def _persona_field(persona: Any, key: str) -> str:
-    """人格对象在不同版本里可能是 dict、也可能是带属性的对象。"""
+    """人格对象在不同版本里可能是 dict、也可能是带属性的对象，字段名也换过。"""
     if persona is None:
         return ""
-    if isinstance(persona, dict):
-        return str(persona.get(key) or "")
-    return str(getattr(persona, key, "") or "")
+    for alias in _FIELD_ALIASES.get(key, (key,)):
+        value = persona.get(alias) if isinstance(persona, dict) else getattr(persona, alias, None)
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 async def resolve_persona(
@@ -134,13 +141,20 @@ async def resolve_persona(
 
 
 async def _by_id(manager: Any, persona_id: str) -> Any:
-    getter = getattr(manager, "get_persona_v3_by_id", None)
-    if getter is None:
-        return None
-    result = getter(persona_id)
-    if hasattr(result, "__await__"):
-        result = await result
-    return result
+    """按 id 取人格。两个入口都试一遍：老接口返回 TypedDict，新接口返回 SQLModel。"""
+    for attr in ("get_persona_v3_by_id", "get_persona"):
+        getter = getattr(manager, attr, None)
+        if getter is None:
+            continue
+        try:
+            result = getter(persona_id)
+            if hasattr(result, "__await__"):
+                result = await result
+        except Exception:
+            continue
+        if result is not None and _persona_field(result, "prompt"):
+            return result
+    return None
 
 
 async def _default_persona(manager: Any, umo: str = "") -> Any:

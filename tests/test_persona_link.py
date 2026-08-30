@@ -54,10 +54,10 @@ class TestPersonaInfo:
         assert not PersonaInfo().usable
         assert PersonaInfo(name="\u7231\u4e43", prompt="   ").to_prompt_block() == ""
 
-    def test_block_mentions_name_and_keeps_rules(self):
+    def test_block_carries_name_and_setting_only(self):
+        """\u4eba\u683c\u5757\u53ea\u8d1f\u8d23\u4ea4\u4ee3\u300c\u4f60\u662f\u8c01\u300d\uff1b\u73b0\u5728\u7684\u94c1\u5f8b\u7531 prompts \u5728\u9996\u5c3e\u4e24\u7aef\u5206\u522b\u8865\u4e0a\u3002"""
         block = PersonaInfo(name="\u7231\u4e43", prompt="\u4f60\u662f\u4fee\u98ce\u8f66\u7684\u5c11\u5973").to_prompt_block()
         assert "\u7231\u4e43" in block
-        assert "\u7ed3\u8bba\u4e0e\u8bc4\u5206\u53ea\u80fd\u6765\u81ea\u8bed\u6599" in block
         assert "\u4f60\u662f\u4fee\u98ce\u8f66\u7684\u5c11\u5973" in block
 
     def test_long_prompt_is_truncated(self):

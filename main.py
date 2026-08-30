@@ -14,6 +14,8 @@ import contextlib
 import hashlib
 import re
 import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +30,7 @@ from quart import jsonify, request
 
 from .prism import (
     cards,
+    chain,
     collector,
     dashboard,
     dialogue,
@@ -36,6 +39,7 @@ from .prism import (
     persona_link,
     scanning,
     scenes,
+    typetags,
 )
 from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
@@ -45,17 +49,25 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.3.0"
+PLUGIN_VERSION = "v1.4.0"
 
 #: 插件自己刷出去的固定文案特征。协议端常把机器人发出去的消息当群消息回灌，
 #: 这些提示 / 兜底长文不是聊天语料，混进库里会让机器人的画像变成"插件说明书"。
 _ECHO_MARKS = (
+    # 进度与兜底提示（措辞改过好几版，旧版文案一并留着，老库里的回声也能挡掉）
     "还不够生成画像",
     "还不够结算恋爱成分",
+    "还凑不出",
+    "目前只攒到",
+    "样本不够出诊断",
+    "句发言，正在分析",
+    "先用已经记下的",
+    "恋爱诊断 7 天",
     "本群语料状态：",
     "采集诊断：",
     "文案口吻：",
     "请到 WebUI 的「提示词」页检查",
+    # 拒绝与限流
     "对方已用「棱镜隐身」",
     "对方在保护名单里",
     "本群今天的分析次数已用完",
@@ -68,11 +80,24 @@ _ECHO_MARKS = (
     "先用「棱镜画像」生成一份",
     "先用「画像」生成一份",
     "下次分析会重新回溯",
+    "已在配置里关闭",
+    "已在配置中关闭",
+    "这条指令只在群里有效",
+    "只有管理员可以切换本群主题",
+    "没有这个主题，发送「棱镜主题」",
+    "拿不到协议端客户端",
+    # 结果类长文的固定抬头
+    "本群卡片主题已切换为",
+    "加入保护名单",
+    "从保护名单移除",
+    "生成失败了，日志里有详细堆栈",
+    "诊断失败了，日志里有详细堆栈",
 )
 _ECHO_RE = re.compile("|".join(re.escape(mark) for mark in _ECHO_MARKS))
 
 #: 记多少条"刚发出去的文案"摘要。够覆盖协议端回灌的延迟就行。
-_ECHO_MEMORY = 200
+#: 一次回溯可能一口气灌进好几页历史，记忆太浅会让刚发出去的提示漏挡。
+_ECHO_MEMORY = 400
 
 #: 同一个群、同一个统计窗口，多少秒内不重复出网补齐历史。
 #: 连着发几条指令（或排行榜紧跟单人诊断）时不必把群历史再翻一遍。
@@ -238,6 +263,34 @@ def _fmt_ts(ts: Any, pattern: str = "%Y-%m-%d") -> str:
     with contextlib.suppress(Exception):
         return time.strftime(pattern, time.localtime(number))
     return ""
+
+
+@dataclass(slots=True)
+class _DialogueScope:
+    """一次分析所依据的「群聊现场」。
+
+    rows 是这次真正读过的那批群聊（按时间排好），chain_scenes 是模型圈出的几场
+    对话。提示词里的现场和卡片上的聊天气泡都从这里取景，两边看到的才是同一场。
+    """
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    names: dict[str, str] = field(default_factory=dict)
+    chain_scenes: list[chain.ChainScene] = field(default_factory=list)
+
+    def window_hint(self) -> Callable[[str, int], list[dict[str, Any]]] | None:
+        """证供还原时用的取景函数。没有模型场次就返回 None，让 scenes 走本地切法。"""
+        if not self.rows or not self.chain_scenes:
+            return None
+        rows = self.rows
+        picked = self.chain_scenes
+
+        def resolve(message_id: str, ts: int) -> list[dict[str, Any]]:
+            index = scenes.locate_row_index(rows, message_id=message_id, center_ts=ts)
+            if index < 0:
+                return []
+            return chain.scene_rows(rows, picked, index)
+
+        return resolve
 
 
 class PersonaPrismStar(Star):
@@ -484,15 +537,16 @@ class PersonaPrismStar(Star):
         user_id = str(event.get_sender_id() or "")
         if not user_id:
             return
-        self_id = _self_id(event)
         segments = event.get_messages() or []
         rich = collector.parse_segments_rich(segments)
         text = rich["text"]
         if not text or self._is_own_command(text):
             return
-        if self_id and user_id == self_id and self._is_plugin_echo(text):
+        if self._is_plugin_echo(text):
             #: 机器人自己的聊天照常入库（它继承了人格，也是群里的一员），
             #: 但插件自己刷出去的提示和兜底长文不是语料，挡掉。
+            #: 这里不再限定"必须是机器人发的"：部分协议端回灌时 sender 会变成
+            #: 触发者甚至匿名，按发送者过滤就漏了，而这些文案的特征本身足够独特。
             return
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
         if not message_id:
@@ -777,14 +831,9 @@ class PersonaPrismStar(Star):
         """清洗一页群历史并入库，返回新增条数。纯图 / 极短消息按互动信号保留。"""
         rows = collector.parse_history_page(messages)
         rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
-        if self_id:
-            #: 机器人自己的发言留着（它也在群里聊天），只挡插件刷出去的提示文案。
-            rows = [
-                row
-                for row in rows
-                if str(row.get("user_id") or "") != self_id
-                or not self._is_plugin_echo(str(row.get("text") or ""))
-            ]
+        #: 机器人自己的发言留着（它也在群里聊天），只挡插件刷出去的提示文案。
+        #: 不按发送者过滤：协议端回灌历史时 sender 未必是机器人自己。
+        rows = [row for row in rows if not self._is_plugin_echo(str(row.get("text") or ""))]
         cleaned = collector.clean_rows(
             rows,
             min_chars=self.config.int_of("collect.min_chars"),
@@ -838,7 +887,6 @@ class PersonaPrismStar(Star):
             report.supported = False
             return report
 
-        bot_id = _self_id(event)
         rounds = max(0, self.config.int_of("collect.backfill_rounds"))
         page_size = max(20, self.config.int_of("collect.page_size"))
         report.planned_rounds = rounds
@@ -985,13 +1033,7 @@ class PersonaPrismStar(Star):
                 report.scanned += len(messages)
             rows = collector.parse_history_page(messages)
             rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
-            if bot_id:
-                rows = [
-                    row
-                    for row in rows
-                    if str(row.get("user_id") or "") != bot_id
-                    or not self._is_plugin_echo(str(row.get("text") or ""))
-                ]
+            rows = [row for row in rows if not self._is_plugin_echo(str(row.get("text") or ""))]
             cleaned = collector.clean_rows(
                 rows,
                 min_chars=self.config.int_of("collect.min_chars"),
@@ -1114,6 +1156,13 @@ class PersonaPrismStar(Star):
         left = bucket.get(key, 0.0) + window - time.time()
         return int(left) + 1 if left > 0 else 0
 
+    def _type_label(self, portrait: Any) -> str:
+        """人格徽章上的文字。配置关掉、或模型没给出可用代码时返回空串。"""
+        code = getattr(portrait, "type_code", "") or ""
+        if not code:
+            return ""
+        return typetags.label_of(code, self.config.str_of("profile.type_tag"))
+
     async def _restore_scenes(
         self,
         platform: str,
@@ -1122,18 +1171,21 @@ class PersonaPrismStar(Star):
         bundle: CorpusBundle,
         target_id: str,
         self_id: str = "",
+        scope: _DialogueScope | None = None,
     ) -> int:
         """把模型挑出的原话还原成聊天现场（呈堂证供的气泡）。
 
         模型只看得到目标本人的发言，所以别人那几句必须回库里捞 —— 捞不到就
         原样留着 quote，卡片会退化成单行引用，绝不让模型代笔别人的台词。
         """
-        items = [e for e in (portrait.evidence or ()) if not e.dialogue and e.quote.strip()]
+        items = [
+            e for e in (portrait.evidence or ()) if e.dialogue or e.quote.strip()
+        ]
         if not items or not group_id:
             return 0
         stamps: list[int] = []
-        for item in items[:5]:
-            hit = scenes.locate_quote(item.quote, bundle.messages)
+        for item in items[:6]:
+            hit = scenes.locate_quote(scenes.own_quote(item), bundle.messages)
             if hit is not None and int(hit.ts or 0) > 0:
                 stamps.append(int(hit.ts))
         if not stamps:
@@ -1150,16 +1202,25 @@ class PersonaPrismStar(Star):
             return 0
         context = sorted(merged.values(), key=lambda r: int(r.get("ts") or 0))
         names = love.collect_names(context)
-        filled = scenes.enrich_all(
+        if scope is not None and scope.names:
+            #: 模型读现场时用的昵称表更全（含被 @ 到但当时没说话的人），合过来。
+            names = {**scope.names, **names}
+        filled, downgraded = scenes.harden_all(
             items,
             bundle.messages,
             context,
             user_id=target_id,
             names=names,
             self_id=self_id,
+            window_hint=scope.window_hint() if scope is not None else None,
         )
-        if filled:
-            logger.info("[人格棱镜] 已为 %s/%s 条证供还原聊天现场。", filled, len(items))
+        if filled or downgraded:
+            logger.info(
+                "[人格棱镜] 证供现场还原 %s/%s 条；%s 条对不上本地记录已降级成单条引用。",
+                filled,
+                len(items),
+                downgraded,
+            )
         return filled
 
     async def _dialogue_context(
@@ -1169,23 +1230,28 @@ class PersonaPrismStar(Star):
         group_id: str,
         bundle: CorpusBundle,
         target_id: str,
-    ) -> tuple[str, str]:
+        target_name: str = "",
+    ) -> tuple[str, str, _DialogueScope | None]:
         """捞出 TA 每句话前后的群聊，拼成「对话现场」与「互动结构」两段提示。
 
         群聊是对话：只把 TA 本人的发言喂给模型，短回复型的人很容易被误判成
         "自言自语"。这里围绕 TA 的发言均匀取若干个时间点，把当时前后的群聊
         一起附上；内容全部来自本地已采集的记录，逐字取用，不出网。
+
+        「哪几句算同一场对话」这件事，代码只能按时间和条数硬切，切歪是常事。
+        所以开关打开时先请模型圈一遍场次（它只回编号，原文仍逐字来自本地记录），
+        圈不出来再退回本地切法。
         """
         if not group_id or not bundle.messages:
-            return "", ""
+            return "", "", None
         if not self.config.bool_of("dialogue.context_enabled"):
-            return "", ""
+            return "", "", None
         span = self.config.int_of("dialogue.context_span")
         max_scenes = self.config.int_of("dialogue.max_scenes")
         max_lines = self.config.int_of("dialogue.max_lines")
         stamps = sorted({int(msg.ts) for msg in bundle.messages if int(msg.ts or 0) > 0})
         if not stamps:
-            return "", ""
+            return "", "", None
         merged: dict[str, dict[str, Any]] = {}
         for stamp in dialogue.pick_evenly(stamps, max(1, max_scenes)):
             try:
@@ -1197,19 +1263,41 @@ class PersonaPrismStar(Star):
                 key = mid or "{}:{}".format(row.get("ts"), row.get("user_id"))
                 merged[key] = row
         if not merged:
-            return "", ""
-        rows = sorted(merged.values(), key=lambda r: int(r.get("ts") or 0))
+            return "", "", None
+        rows = dialogue.order_rows(list(merged.values()))
         names = love.collect_names(rows)
         self_id = _self_id(event)
-        block = dialogue.build_dialogue_block(
-            rows,
-            target_id,
-            names=names,
-            context=span,
-            max_scenes=max_scenes,
-            max_lines=max_lines,
-            self_id=self_id,
-        )
+        scope = _DialogueScope(rows=rows, names=names)
+        block = ""
+        if self.config.bool_of("dialogue.llm_chain"):
+            scope.chain_scenes = await self.analyzer.pick_dialogue_chain(
+                rows,
+                target_id,
+                target_name=target_name,
+                umo=event.unified_msg_origin,
+                self_id=self_id,
+                names=names,
+                max_scenes=self.config.int_of("dialogue.llm_chain_scenes"),
+            )
+            if scope.chain_scenes:
+                block = chain.render_block(
+                    rows,
+                    scope.chain_scenes,
+                    target_id,
+                    names=names,
+                    self_id=self_id,
+                    max_lines=max_lines,
+                )
+        if not block:
+            block = dialogue.build_dialogue_block(
+                rows,
+                target_id,
+                names=names,
+                context=span,
+                max_scenes=max_scenes,
+                max_lines=max_lines,
+                self_id=self_id,
+            )
         social = ""
         if self.config.bool_of("dialogue.social_signals"):
             social = dialogue.social_signals(
@@ -1218,7 +1306,7 @@ class PersonaPrismStar(Star):
                 names=names,
                 self_id=self_id,
             ).to_prompt_block()
-        return block, social
+        return block, social, scope
 
     async def _execute(self, event: AstrMessageEvent, spec: PromptSpec | None):
         """一次完整的画像流程。所有指令都收敛到这里，便于统一限流与埋点。"""
@@ -1355,13 +1443,15 @@ class PersonaPrismStar(Star):
                 target_name = await self.astore.latest_user_name(platform, group_id, target_id) or target_id
 
             dialogue_block, social_block = "", ""
+            scope: _DialogueScope | None = None
             with contextlib.suppress(Exception):
-                dialogue_block, social_block = await self._dialogue_context(
+                dialogue_block, social_block, scope = await self._dialogue_context(
                     event,
                     platform,
                     group_id,
                     bundle,
                     target_id,
+                    target_name=target_name,
                 )
 
             portrait, model = await self.analyzer.analyze(
@@ -1378,7 +1468,13 @@ class PersonaPrismStar(Star):
             )
             with contextlib.suppress(Exception):
                 await self._restore_scenes(
-                    platform, group_id, portrait, bundle, target_id, self_id=_self_id(event)
+                    platform,
+                    group_id,
+                    portrait,
+                    bundle,
+                    target_id,
+                    self_id=_self_id(event),
+                    scope=scope,
                 )
 
             theme_choice = cards.normalize_theme_choice(
@@ -1437,6 +1533,8 @@ class PersonaPrismStar(Star):
                 show_evidence=self.config.bool_of("render.show_evidence"),
                 show_avatar=self.config.bool_of("render.show_avatar"),
                 title_badge=portrait.title,
+                type_label=self._type_label(portrait),
+                persona_name=getattr(portrait, "persona", "") or "",
             )
             record_key = f"{spec.key}_{record_id}"
             layout = normalize_layout(spec.layout, spec.structured)
@@ -1804,23 +1902,46 @@ class PersonaPrismStar(Star):
             )
 
             self_id = _self_id(event)
-            names = love.collect_names(rows)
+            ordered_rows = dialogue.order_rows(rows)
+            names = love.collect_names(ordered_rows)
             #: 恋爱诊断本来就把整个窗口的群聊都拿在手上，直接切成对话现场即可。
+            love_scope = _DialogueScope(rows=ordered_rows, names=names)
             love_dialogue = ""
             love_social = ""
             if self.config.bool_of("dialogue.context_enabled"):
-                love_dialogue = dialogue.build_dialogue_block(
-                    rows,
-                    target_id,
-                    names=names,
-                    context=self.config.int_of("dialogue.context_span"),
-                    max_scenes=self.config.int_of("dialogue.max_scenes"),
-                    max_lines=self.config.int_of("dialogue.max_lines"),
-                    self_id=self_id,
-                )
+                if self.config.bool_of("dialogue.llm_chain"):
+                    #: 先让模型圈出成形的来回。谁在跟谁搭话这件事，光看时间戳判断不准。
+                    love_scope.chain_scenes = await self.analyzer.pick_dialogue_chain(
+                        ordered_rows,
+                        target_id,
+                        target_name=target_name,
+                        umo=event.unified_msg_origin,
+                        self_id=self_id,
+                        names=names,
+                        max_scenes=self.config.int_of("dialogue.llm_chain_scenes"),
+                    )
+                    if love_scope.chain_scenes:
+                        love_dialogue = chain.render_block(
+                            ordered_rows,
+                            love_scope.chain_scenes,
+                            target_id,
+                            names=names,
+                            self_id=self_id,
+                            max_lines=self.config.int_of("dialogue.max_lines"),
+                        )
+                if not love_dialogue:
+                    love_dialogue = dialogue.build_dialogue_block(
+                        ordered_rows,
+                        target_id,
+                        names=names,
+                        context=self.config.int_of("dialogue.context_span"),
+                        max_scenes=self.config.int_of("dialogue.max_scenes"),
+                        max_lines=self.config.int_of("dialogue.max_lines"),
+                        self_id=self_id,
+                    )
             if self.config.bool_of("dialogue.social_signals"):
                 love_social = dialogue.social_signals(
-                    rows,
+                    ordered_rows,
                     target_id,
                     names=names,
                     self_id=self_id,
@@ -1851,25 +1972,36 @@ class PersonaPrismStar(Star):
 
             #: 变量名不能叫 scenes：会遮蔽同名模块，函数里后面就用不了 scenes.enrich_all。
             local_scenes = love.build_scenes(
-                rows,
+                ordered_rows,
                 target_id,
                 names=names,
                 tz_offset=self._tz_offset(),
                 self_id=self_id,
+                window_hint=love_scope.window_hint(),
             )
             if llm_portrait is not None:
-                #: 模型只看得到本人的发言，它挑出的原话要回库里配上前后文才有气泡。
-                pending = [e for e in llm_portrait.evidence if not e.dialogue and e.quote.strip()]
+                #: 模型只看得到本人的发言，它挑出的原话要回库里配上前后文才有气泡；
+                #: 它自己转写的那份对话也一律重建 —— 否则气泡没有头像也没有时刻。
+                pending = [
+                    e for e in llm_portrait.evidence if e.dialogue or e.quote.strip()
+                ]
                 if pending:
                     with contextlib.suppress(Exception):
-                        scenes.enrich_all(
+                        hardened, dropped = scenes.harden_all(
                             pending,
                             bundle.messages,
-                            rows,
+                            ordered_rows,
                             user_id=target_id,
                             names=names,
                             label="现场片段",
                             self_id=self_id,
+                            window_hint=love_scope.window_hint(),
+                        )
+                        logger.info(
+                            "[人格棱镜] 恋爱证供现场还原 %s/%s 条，降级 %s 条。",
+                            hardened,
+                            len(pending),
+                            dropped,
                         )
             #: 底部一行小字给普通玩家看，够交代取样口径就行；翻页是否覆盖完整之类的
             #: 排查信息只写后台日志。
@@ -1940,6 +2072,8 @@ class PersonaPrismStar(Star):
                 show_evidence=self.config.bool_of("render.show_evidence"),
                 show_avatar=self.config.bool_of("render.show_avatar"),
                 title_badge=portrait.title,
+                type_label=self._type_label(portrait),
+                persona_name=getattr(portrait, "persona", "") or "",
             )
             result = await self.renderer.render(portrait, ctx, record_key=f"love_{record_id}")
             backend = result.backend
@@ -2575,7 +2709,7 @@ class PersonaPrismStar(Star):
 
         total = sum(len(group.items) for group in groups)
         backends = " → ".join(self.renderer.backends())
-        chain = f"{self.config.str_of('render.backend')}（{backends}）"
+        render_chain = f"{self.config.str_of('render.backend')}（{backends}）"
 
         lines = [
             f"人格棱镜 {PLUGIN_VERSION} · 指令一览",
@@ -2589,7 +2723,7 @@ class PersonaPrismStar(Star):
                 lines.append(f"  {item.command} —— {item.label}{tail}")
         lines += [
             "",
-            f"当前渲染链路：{chain}",
+            f"当前渲染链路：{render_chain}",
             f"本群卡片主题：{cards.describe_theme_choice(theme_choice, theme)}",
             "棱镜系列出结构化卡片，画像系列出上游同款长文卡，两者互不影响。",
             "更详细的配置与记录管理请打开 WebUI 的「人格棱镜」页面。",
@@ -2636,7 +2770,7 @@ class PersonaPrismStar(Star):
                 (
                     "工作台",
                     [
-                        f"渲染链路 {chain}",
+                        f"渲染链路 {render_chain}",
                         "「棱镜主题」切换本群主题",
                         "WebUI「人格棱镜」页管配置",
                         "记录按群 / 按人分类可查",

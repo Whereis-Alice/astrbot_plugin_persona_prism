@@ -22,7 +22,13 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .models import Dimension, Evidence, Portrait, Section, Tag, Term
-from .scenes import center_scene, rows_to_utterances, scene_has_substance, scene_window
+from .scenes import (
+    WindowHint,
+    center_scene,
+    rows_to_utterances,
+    scene_has_substance,
+    scene_window,
+)
 from .titles import love_title, normalize_title
 
 #: 归一化曲线的默认斜率。normalize(20)≈46、normalize(50)≈84。
@@ -826,6 +832,7 @@ def build_scenes(
     context: int = 1,
     tz_offset: int = 8,
     self_id: str = "",
+    window_hint: WindowHint | None = None,
 ) -> list[Evidence]:
     """从语料里裁出几段真实对话，作为公式版的现场证供。
 
@@ -871,13 +878,21 @@ def build_scenes(
         if any(abs(index - spot) <= context for spot in taken):
             continue
         stamp = int(ordered[index].get("ts") or 0)
-        window = scene_window(
-            ordered,
-            message_id=str(ordered[index].get("message_id") or ""),
-            center_ts=stamp,
-            user_id=user_id,
-            min_others=1,
-        )
+        window: Sequence[dict[str, Any]] = ()
+        if window_hint is not None:
+            #: 模型圈过对话场次时按场取景，避免把一次来回切成半截。
+            try:
+                window = window_hint(str(ordered[index].get("message_id") or ""), stamp) or ()
+            except Exception:
+                window = ()
+        if not window:
+            window = scene_window(
+                ordered,
+                message_id=str(ordered[index].get("message_id") or ""),
+                center_ts=stamp,
+                user_id=user_id,
+                min_others=1,
+            )
         dialogue = center_scene(rows_to_utterances(window, user_id, names=nick, self_id=self_id))
         if not dialogue or not scene_has_substance(dialogue):
             continue
@@ -892,6 +907,7 @@ def build_scenes(
                 reason=_SCENE_REASONS.get(kind, ""),
                 title=title,
                 dialogue=dialogue,
+                verified=True,
             ),
         ))
     picked.sort(key=lambda item: item[0])
@@ -962,6 +978,10 @@ def merge_portrait(
     )
     if llm is None:
         return base
+    # 执笔人格与 16 型代码是「谁在写这张卡」的标记，公式版本身给不出来，
+    # 模型来了就得带上，否则卡片上的署名和人格徽章会凭空消失。
+    base.persona = llm.persona
+    base.type_code = llm.type_code
     if not llm.structured:
         raw = (llm.raw_text or "").strip()
         if raw:
@@ -977,9 +997,20 @@ def merge_portrait(
     trend = trend_text(metrics)
     if trend:
         sections.append(Section("趋势", trend))
-    evidence = [e for e in llm.evidence if e.dialogue or e.quote.strip()]
-    if not evidence:
-        evidence = list(base.evidence)
+    # 证供优先用「模型挑的 + 已经对回本地记录的」那几条：既有选择理由，气泡也全真。
+    # 模型挑的原话一条都没对上时，整段换成本地裁出来的现场 —— 有头像有时刻的真截图，
+    # 比一条孤零零的引用好看得多。
+    llm_evidence = [e for e in llm.evidence if e.dialogue or e.quote.strip()]
+    verified = [e for e in llm_evidence if e.verified and e.dialogue]
+    if verified:
+        evidence = verified
+        if len(evidence) < 2:
+            seen = {(e.quote or "").strip() for e in evidence}
+            evidence = evidence + [
+                e for e in (scenes or ()) if (e.quote or "").strip() not in seen
+            ][:2]
+    else:
+        evidence = list(base.evidence) or llm_evidence
     return Portrait(
         kind="love",
         headline=llm.headline.strip() or base.headline,
@@ -995,6 +1026,8 @@ def merge_portrait(
         sample_note=sample_note,
         confidence=metrics.confidence,
         raw_text=llm.raw_text,
+        type_code=llm.type_code,
+        persona=llm.persona,
         structured=True,
     )
 

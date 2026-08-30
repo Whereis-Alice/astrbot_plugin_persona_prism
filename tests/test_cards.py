@@ -537,6 +537,75 @@ def test_title_badge_is_escaped():
     html = cards.build_card_html(_portrait(title="<script>x</script>"), _ctx())
     assert "<script>" not in html
 
+
+# ---------------------------------------------------------------------------
+# 人格徽章与执笔署名
+# ---------------------------------------------------------------------------
+
+
+def test_type_tag_splits_code_and_alias():
+    html = cards.build_card_html(_portrait(), _ctx(type_label="INTP · 逻辑学家"))
+    assert 'class="tt-code">INTP<' in html
+    assert 'class="tt-name">逻辑学家<' in html
+
+
+def test_type_tag_absent_when_label_blank():
+    html = cards.build_card_html(_portrait(), _ctx())
+    assert 'class="type-tag"' not in html
+
+
+def test_type_tag_without_alias_still_renders_code():
+    html = cards.build_card_html(_portrait(), _ctx(type_label="ENTP"))
+    assert 'class="tt-code">ENTP<' in html
+    assert 'class="tt-name"' not in html
+
+
+def test_type_tag_needs_a_code():
+    #: 只有中文别名、没有四字母代号时不出徽章，免得渲染成半截空壳。
+    for bad in (" · 逻辑学家", "水瓶座 · 逻辑学家", "<b>X</b> · Y"):
+        html = cards.build_card_html(_portrait(), _ctx(type_label=bad))
+        assert 'class="type-tag"' not in html
+
+
+def test_type_tag_is_escaped():
+    html = cards.build_card_html(_portrait(), _ctx(type_label="INTP · <i>Y</i>"))
+    assert "<i>Y</i>" not in html
+    assert "&lt;i&gt;Y&lt;/i&gt;" in html
+
+
+def test_badges_row_wraps_title_and_type_tag_together():
+    html = cards.build_card_html(_portrait(title="深夜哲学家"), _ctx(type_label="INTP · 逻辑学家"))
+    row = html.split('class="badges"')[1].split('class="chips"')[0]
+    assert "title-badge" in row
+    assert "type-tag" in row
+
+
+def test_badges_row_disappears_when_both_are_empty():
+    html = cards.build_card_html(_portrait(title=""), _ctx())
+    assert 'class="badges"' not in html
+
+
+def test_every_theme_styles_the_type_tag():
+    for name in cards.THEMES:
+        html = cards.build_card_html(_portrait(), _ctx(theme=name, type_label="ISFP · 探险家"))
+        assert ".type-tag {" in html
+        assert 'class="tt-name">探险家<' in html
+
+
+def test_persona_name_is_credited_in_the_chips():
+    html = cards.build_card_html(_portrait(), _ctx(persona_name="爱丽丝"))
+    assert "执笔 · 爱丽丝" in html
+
+
+def test_persona_credit_absent_without_persona():
+    assert "执笔" not in cards.build_card_html(_portrait(), _ctx())
+
+
+def test_persona_name_is_escaped():
+    html = cards.build_card_html(_portrait(), _ctx(persona_name="<script>x</script>"))
+    assert "<script>" not in html
+
+
 # ---------------------------------------------------------------------------
 # 聊天现场的头像
 # ---------------------------------------------------------------------------

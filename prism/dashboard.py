@@ -166,9 +166,21 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "统计互动结构",
         "hint": "顺带告诉模型 TA 主动搭话多少次、被回应多少次、常跟谁互动，让「社交位置」这类结论有据可依。",
     },
+    "dialogue.llm_chain": {
+        "label": "让模型挑对话",
+        "hint": "群聊不是一问一答，靠时间和条数切窗口经常切歪。开启后会额外花一次很小的模型调用，让模型自己圈出「哪几句是同一场对话」，卡片上的聊天现场因此更连贯。失败会自动退回本地切法。",
+    },
+    "dialogue.llm_chain_scenes": {
+        "label": "挑几场对话",
+        "hint": "上面的开关打开时，最多让模型圈出几场对话。太多会让卡片变得冗长。",
+    },
+    "profile.type_tag": {
+        "label": "人格类型徽章",
+        "hint": "在卡片头衔旁边加一枚四字母人格代号。官方译名最中规中矩，玩梗版和二次元版更适合娱乐群。选「关闭」就不显示。",
+    },
     "persona.use_astrbot_persona": {
         "label": "借用 AstrBot 人格口吻",
-        "hint": "开启后卡片文案会用当前会话人格的说话方式来写，评分和结构不变。默认关闭，因为人格设定五花八门，可能把正经点评写成戏精发言。",
+        "hint": "开启后卡片文案会用机器人当前人格的说话方式来写——同一份语料，不同人格给出的点评口气完全不同。评分、结构和证据都不受影响。会话里显式关掉人格时自动跳过。",
     },
     "persona.persona_id": {
         "label": "指定人格",
@@ -209,6 +221,7 @@ GROUP_TITLES: dict[str, dict[str, str]] = {
     "persona_clone": {"label": "人格克隆", "icon": "mask"},
     "love": {"label": "恋爱诊断", "icon": "heart"},
     "dialogue": {"label": "对话理解", "icon": "users"},
+    "profile": {"label": "人格徽章", "icon": "tag"},
     "persona": {"label": "人格联动", "icon": "prompt"},
     "behavior": {"label": "行为", "icon": "sliders"},
     "compat": {"label": "上游兼容", "icon": "link"},
