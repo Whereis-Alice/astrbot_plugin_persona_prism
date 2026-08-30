@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Portrait, Term, Utterance
+from .scenes import center_scene
 
 #: 卡片主题。label 会显示在 WebUI 和 "棱镜主题" 命令里。
 THEMES: dict[str, dict[str, str]] = {
@@ -52,15 +53,15 @@ EVIDENCE_STYLE: dict[str, dict[str, str]] = {
     "sakura": {"title": "心动物证 · EVIDENCE", "mark": "EVIDENCE", "badge": "心动", "fallback": "心动瞬间"},
 }
 
-#: 每套主题的「专属头衔」徽章装饰（前缀符号 / 小字标签）。
-#: 头衔本身由 LLM 或 prism.titles 生成，这里只决定它戴什么样的框。
+#: 每套主题的「头衔」勋章装饰。只有左右两枚小纹样，不写「称号」这种说明文字 ——
+#: 徽章的形状（绶带尖角 + 内描边）本身就该让人一眼看出这是个头衔。
 TITLE_BADGE_STYLE: dict[str, dict[str, str]] = {
-    "aurora": {"glyph": "✦", "cap": "称号"},
-    "ink": {"glyph": "印", "cap": "封号"},
-    "neon": {"glyph": "▰", "cap": "TITLE"},
-    "paper": {"glyph": "❖", "cap": "本期标题"},
-    "dossier": {"glyph": "✚", "cap": "代号"},
-    "sakura": {"glyph": "♛", "cap": "专属头衔"},
+    "aurora": {"glyph": "✦", "wing": "✦"},
+    "ink": {"glyph": "❖", "wing": "❖"},
+    "neon": {"glyph": "◤", "wing": "◥"},
+    "paper": {"glyph": "❦", "wing": "❦"},
+    "dossier": {"glyph": "✚", "wing": "✚"},
+    "sakura": {"glyph": "♡", "wing": "♡"},
 }
 
 #: 头衔里的尾部括注，例如「纯爱战神（反讽）」的「反讽」。
@@ -559,26 +560,37 @@ body {
   color: var(--ink-strong);
   word-break: break-all;
 }
+/* 头衔勋章：绶带外形 + 内描边 + 左右纹样，靠形状说明「这是个头衔」，
+   所以徽章里除了头衔本身一个字都不多写。 */
 .title-badge {
-  display: inline-flex; align-items: baseline; gap: 7px;
-  margin-top: 11px; max-width: 100%;
-  padding: 5px 15px 6px 12px;
-  border-radius: 999px;
+  position: relative;
+  display: inline-flex; align-items: center; gap: 9px;
+  margin-top: 14px; max-width: 100%;
+  padding: 9px 22px 17px;
+  border-radius: 7px 7px 3px 3px;
   background: var(--badge-bg);
   border: var(--badge-border);
   color: var(--badge-ink);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 74%, 0 100%);
+  box-shadow: 0 10px 22px rgba(0,0,0,.16);
 }
-.title-badge .tb-glyph { font-size: 13px; opacity: .85; }
-.title-badge .tb-cap {
-  font-size: 10px; letter-spacing: .22em; opacity: .62;
-  align-self: center;
+.title-badge::before {
+  content: ""; position: absolute; inset: 3px;
+  border: 1px solid currentColor; opacity: .26; border-radius: 4px;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%);
+}
+.title-badge .tb-glyph, .title-badge .tb-wing {
+  font-size: 12px; opacity: .72; transform: translateY(-4px);
 }
 .title-badge .tb-name {
   font-family: var(--font-title);
-  font-size: 17px; font-weight: 700; line-height: 1.25;
-  word-break: break-all;
+  font-size: 19px; font-weight: 800; line-height: 1.2;
+  letter-spacing: .02em; word-break: break-all;
+  transform: translateY(-4px);
 }
-.title-badge .tb-note { font-size: 12px; opacity: .7; }
+.title-badge .tb-note {
+  font-size: 12px; opacity: .72; transform: translateY(-3px);
+}
 .title-badge .tb-note::before { content: "（"; }
 .title-badge .tb-note::after { content: "）"; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -710,6 +722,8 @@ _THEME_CSS: dict[str, str] = {
   --bub-me-border: 1px solid rgba(127,227,255,.42);
   --bub-me-ink: #eaf9ff;
   --bub-radius: 14px;
+  --chat-bg: rgba(9,13,28,.44);
+  --chat-head: rgba(120,150,220,.14);
   --block-bg: rgba(18,24,48,.55);
   --block-border: 1px solid rgba(150,180,255,.15);
   --bar-bg: rgba(140,160,210,.2);
@@ -754,6 +768,8 @@ _THEME_CSS: dict[str, str] = {
   --bub-me-border: 1px solid rgba(156,59,50,.30);
   --bub-me-ink: #3a2b24;
   --bub-radius: 4px;
+  --chat-bg: rgba(255,253,246,.60);
+  --chat-head: rgba(120,105,80,.09);
   --block-bg: rgba(255,252,244,.7);
   --block-border: 1px solid rgba(120,105,80,.18);
   --bar-bg: rgba(120,105,80,.16);
@@ -800,6 +816,8 @@ _THEME_CSS: dict[str, str] = {
   --bub-me-border: 1px solid rgba(0,255,214,.42);
   --bub-me-ink: #d8fff8;
   --bub-radius: 10px;
+  --chat-bg: rgba(0,0,0,.28);
+  --chat-head: rgba(0,255,214,.07);
   --block-bg: rgba(255,255,255,.03);
   --block-border: 1px solid rgba(0,255,214,.16);
   --bar-bg: rgba(255,255,255,.08);
@@ -819,7 +837,11 @@ _THEME_CSS: dict[str, str] = {
 }
 .who h1 { text-shadow: 0 0 18px rgba(0,255,214,.45); }
 .kicker { text-shadow: 0 0 12px rgba(0,255,214,.6); }
-.title-badge { border-radius: 4px; text-shadow: 0 0 14px rgba(255,46,154,.5); }
+.title-badge {
+  border-radius: 0; text-shadow: 0 0 14px rgba(255,46,154,.5);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 70%, 0 100%);
+}
+.title-badge::before { border-radius: 0; opacity: .4; }
 .title-badge .tb-name { letter-spacing: .06em; }
 """,
     "paper": """
@@ -847,6 +869,8 @@ _THEME_CSS: dict[str, str] = {
   --bub-me-border: 1px solid #f0d6cd;
   --bub-me-ink: #241f16;
   --bub-radius: 3px;
+  --chat-bg: #fbfaf6;
+  --chat-head: #f1efe8;
   --block-bg: #fbfaf7;
   --block-border: 1px solid #eeebe4;
   --bar-bg: #ecebe6;
@@ -893,6 +917,8 @@ _THEME_CSS: dict[str, str] = {
   --bub-me-border: 1px dashed rgba(138,43,30,.42);
   --bub-me-ink: #3b2a1c;
   --bub-radius: 2px;
+  --chat-bg: rgba(255,252,240,.52);
+  --chat-head: rgba(90,76,48,.10);
   --block-bg: rgba(252,246,228,.62);
   --block-border: 1px solid rgba(80,68,44,.22);
   --bar-bg: rgba(80,68,44,.18);
@@ -913,8 +939,11 @@ _THEME_CSS: dict[str, str] = {
 .kicker { letter-spacing: .34em; }
 .badge { transform: rotate(6deg); font-weight: 700; }
 .sec h3::before { content: "// "; color: var(--accent); }
-.title-badge { border-radius: 2px; transform: rotate(-1.2deg); }
-.title-badge .tb-cap { letter-spacing: .3em; }
+.title-badge {
+  border-radius: 2px; transform: rotate(-1.2deg);
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 78%, 0 100%);
+}
+.title-badge::before { border-radius: 1px; border-style: dashed; opacity: .45; }
 """,
     "sakura": """
 :root {
@@ -942,6 +971,8 @@ _THEME_CSS: dict[str, str] = {
   --bub-me-border: 1px solid rgba(255,120,180,.44);
   --bub-me-ink: #46203b;
   --bub-radius: 16px;
+  --chat-bg: rgba(255,247,251,.82);
+  --chat-head: rgba(255,160,205,.16);
   --block-bg: rgba(255,247,251,.82);
   --block-border: 1px solid rgba(255,160,205,.3);
   --bar-bg: rgba(255,170,208,.26);
@@ -962,7 +993,11 @@ _THEME_CSS: dict[str, str] = {
 .kicker { letter-spacing: .26em; }
 .badge { font-weight: 700; }
 .sec h3::before { content: "♡ "; color: var(--accent); }
-.title-badge { box-shadow: 0 6px 18px rgba(255,95,162,.24); }
+.title-badge {
+  box-shadow: 0 8px 20px rgba(255,95,162,.28);
+  border-radius: 12px 12px 4px 4px;
+}
+.title-badge::before { border-radius: 9px; }
 .tag { font-weight: 600; }
 """,
 }
@@ -988,29 +1023,56 @@ _EVIDENCE_CSS = """
 .evs { display: flex; flex-direction: column; gap: 16px; }
 .ev {
   position: relative; overflow: hidden;
-  padding: 15px 18px 15px; border-radius: 16px;
+  border-radius: 16px;
   background: var(--block-bg); border: var(--block-border);
 }
-.ev-mark {
-  position: absolute; right: 14px; bottom: 2px;
-  font-family: var(--font-title); font-size: 30px; letter-spacing: .18em;
-  color: var(--ink-strong); opacity: .07;
+/* 证供头部做成聊天窗口的标题栏，让整块看起来像一张真的聊天截图。 */
+.ev-head {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 15px;
+  background: var(--chat-head, var(--chip-bg));
+  border-bottom: 1px solid var(--rule);
 }
-.ev-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+.ev-dots { display: flex; gap: 4px; flex: 0 0 auto; }
+.ev-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); opacity: .55; }
+.ev-dots i:nth-child(2) { opacity: .36; }
+.ev-dots i:nth-child(3) { opacity: .22; }
 .ev-badge {
   font-family: var(--font-title); font-size: 10.5px; letter-spacing: .14em;
   padding: 3px 9px; border-radius: 999px; white-space: nowrap;
   background: var(--badge-bg); color: var(--badge-ink); border: var(--badge-border);
 }
-.ev-title { font-size: 13px; color: var(--ink-dim); }
+.ev-title {
+  flex: 1 1 auto; min-width: 0; font-size: 13px; color: var(--ink-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ev-when {
+  flex: 0 0 auto; font-family: var(--font-title);
+  font-size: 10.5px; letter-spacing: .1em; color: var(--ink-mute);
+}
 .ev-why {
-  margin-top: 12px; padding-left: 11px;
-  border-left: 2px solid var(--accent-soft);
+  display: flex; gap: 7px; padding: 10px 15px 11px;
+  border-top: 1px dashed var(--rule);
   font-size: 12.5px; line-height: 1.6; color: var(--ink-mute);
 }
+.ev-why::before { content: "↳"; color: var(--accent); opacity: .8; }
 
-.chat { display: flex; flex-direction: column; gap: 10px; position: relative; }
-.crow { display: flex; gap: 9px; align-items: flex-start; }
+.chat {
+  position: relative; overflow: hidden;
+  display: flex; flex-direction: column; gap: 11px;
+  padding: 14px 15px 15px;
+  background: var(--chat-bg, var(--quote-bg));
+}
+.ev-mark {
+  position: absolute; right: 13px; bottom: -4px; z-index: 0;
+  font-family: var(--font-title); font-size: 30px; letter-spacing: .18em;
+  color: var(--ink-strong); opacity: .07;
+}
+.cgap {
+  position: relative; z-index: 1; align-self: center;
+  font-size: 12px; letter-spacing: .34em; color: var(--ink-mute); opacity: .75;
+}
+.crow { position: relative; z-index: 1; display: flex; gap: 9px; align-items: flex-start; }
 .crow.right { flex-direction: row-reverse; }
 .cava {
   flex: 0 0 32px; width: 32px; height: 32px; border-radius: 11px;
@@ -1020,9 +1082,19 @@ _EVIDENCE_CSS = """
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.20);
 }
 .cava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.ccol { display: flex; flex-direction: column; gap: 4px; max-width: 76%; }
+.ccol { display: flex; flex-direction: column; gap: 4px; max-width: 78%; min-width: 0; }
 .crow.right .ccol { align-items: flex-end; }
-.cnm { font-size: 11.5px; color: var(--ink-mute); padding: 0 3px; }
+.cnm {
+  display: flex; align-items: baseline; gap: 6px; max-width: 100%;
+  font-size: 11.5px; color: var(--ink-mute); padding: 0 3px;
+}
+.crow.right .cnm { flex-direction: row-reverse; }
+.cnm b {
+  font-weight: 600; color: var(--ink-dim); max-width: 210px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.crow.right .cnm b { color: var(--accent-ink); }
+.ctm { font-family: var(--font-title); font-size: 10px; letter-spacing: .04em; opacity: .7; }
 .cbub {
   position: relative;
   padding: 9px 13px; border-radius: var(--bub-radius, 14px);
@@ -1206,18 +1278,20 @@ def _initial(name: str, user_id: str) -> str:
 
 
 def _chip_texts(ctx: CardContext) -> list[str]:
+    """卡片顶部的信息小条。
+
+    只写玩家看得懂的东西。“样本 300/6000 条”“跨度 5.2 天”这种数据库口吻
+    已经换成人话，完整数字留在后台日志里。
+    """
     chips: list[str] = []
     if ctx.group_name:
         chips.append(f"群 · {ctx.group_name}")
     if ctx.target_id:
         chips.append(f"ID · {ctx.target_id}")
     if ctx.sample_size:
-        if ctx.total_corpus and ctx.total_corpus > ctx.sample_size:
-            chips.append(f"样本 · {ctx.sample_size}/{ctx.total_corpus} 条")
-        else:
-            chips.append(f"样本 · {ctx.sample_size} 条")
+        chips.append(f"读了 {ctx.sample_size} 句发言")
     if ctx.span_days >= 0.05:
-        chips.append(f"跨度 · {ctx.span_days:.1f} 天")
+        chips.append("当天" if ctx.span_days < 1 else f"近 {round(ctx.span_days)} 天")
     chips.append(time.strftime("%Y-%m-%d %H:%M", time.localtime(ctx.created_at)))
     return chips
 
@@ -1235,11 +1309,11 @@ def _title_badge_html(ctx: CardContext, badge: str) -> str:
         note = matched.group(2).strip()
     inner = (
         f'<span class="tb-glyph">{_esc(style["glyph"])}</span>'
-        f'<span class="tb-cap">{_esc(style["cap"])}</span>'
         f'<span class="tb-name">{_esc(text)}</span>'
     )
     if note:
         inner += f'<span class="tb-note">{_esc(note)}</span>'
+    inner += f'<span class="tb-wing">{_esc(style["wing"])}</span>'
     return f'<span class="title-badge">{inner}</span>'
 
 
@@ -1323,8 +1397,32 @@ def _speaker_color(name: str) -> str:
     return f"hsl({hue} 46% 46%)"
 
 
+#: 对话里的「中间略」占位行，渲染成聊天截图里的省略分隔，而不是一条气泡。
+_GAP_HINTS = ("中间略", "此处省略", "省略部分对话")
+
+#: 场景标题里常带着 "23:11 · 深夜救火" 这种时间前缀，拆出来放到标题栏右侧。
+_SCENE_CLOCK_RE = re.compile(r"^(\d{1,2}:\d{2})\s*[·:：\-—]\s*(.+)$")
+
+
+def _split_scene_title(title: str, lines: Sequence[Utterance]) -> tuple[str, str]:
+    """拆出场景标题里的时间，避免同一个时间在卡片上出现两次。"""
+    text = (title or "").strip()
+    match = _SCENE_CLOCK_RE.match(text)
+    if match:
+        return match.group(2).strip(), match.group(1)
+    clock = next((line.clock for line in lines if line.mine and line.clock), "")
+    if not clock:
+        clock = next((line.clock for line in lines if line.clock), "")
+    return text, clock
+
+
 def _chat_row_html(line: Utterance, ctx: CardContext) -> str:
     """一行聊天气泡。本人靠右并尽量用真头像，其他人靠左用首字母头像。"""
+    text = (line.text or "").strip()
+    if not text:
+        return ""
+    if any(hint in text for hint in _GAP_HINTS):
+        return '<div class="cgap">···</div>'
     side = "right" if line.mine else "left"
     name = (line.speaker or "").strip() or (ctx.target_name if line.mine else "群友")
     avatar = f'<span class="cava" style="background:{_speaker_color(name)}">'
@@ -1332,37 +1430,47 @@ def _chat_row_html(line: Utterance, ctx: CardContext) -> str:
     if line.mine and ctx.show_avatar and ctx.avatar_url:
         avatar += f'<img src="{_esc(ctx.avatar_url)}" alt="" onerror="this.style.display=\'none\'"/>'
     avatar += "</span>"
+    clock = f'<span class="ctm">{_esc(line.clock)}</span>' if line.clock else ""
     return (
         f'<div class="crow {side}">{avatar}'
         '<div class="ccol">'
-        f'<div class="cnm">{_esc(name)}</div>'
-        f'<div class="cbub">{_esc(line.text)}</div>'
+        f'<div class="cnm"><b>{_esc(name)}</b>{clock}</div>'
+        f'<div class="cbub">{_esc(text)}</div>'
         "</div></div>"
     )
 
 
 def _evidence_html(portrait: Portrait, ctx: CardContext) -> str:
-    """证供面板：把选中的原话还原成一小段聊天记录，比干巴巴的引用更有现场感。"""
+    """证供面板：把选中的原话还原成一小段聊天现场，连旁人的那几句一起上卡。
+
+    每一块都做成聊天窗口的样子（标题栏 + 气泡区 + 一句点评），
+    比干巴巴列几条引用更像真的聊天截图，也能看出对话的前因后果。
+    """
     if not ctx.show_evidence or not portrait.evidence:
         return ""
     style = EVIDENCE_STYLE.get(normalize_theme(ctx.theme), EVIDENCE_STYLE[DEFAULT_THEME])
     blocks: list[str] = []
     for index, item in enumerate(portrait.evidence[:5], start=1):
-        lines = item.scene_lines(ctx.target_name)
-        if not lines:
+        lines = center_scene(item.scene_lines(ctx.target_name))
+        rows = "".join(_chat_row_html(line, ctx) for line in lines)
+        if not rows:
             continue
-        rows = "".join(_chat_row_html(line, ctx) for line in lines[:6])
-        title = (item.title or "").strip() or style["fallback"]
+        title, clock = _split_scene_title(item.title, lines)
+        title = title or style["fallback"]
         reason = (item.reason or "").strip()
         why = f'<div class="ev-why">{_esc(reason)}</div>' if reason else ""
+        when = f'<span class="ev-when">{_esc(clock)}</span>' if clock else ""
         blocks.append(
             '<div class="ev">'
-            f'<div class="ev-mark">{_esc(style["mark"])}</div>'
             '<div class="ev-head">'
+            '<span class="ev-dots"><i></i><i></i><i></i></span>'
             f'<span class="ev-badge">{_esc(style["badge"])} {index:02d}</span>'
             f'<span class="ev-title">{_esc(title)}</span>'
+            f"{when}"
             "</div>"
-            f'<div class="chat">{rows}</div>'
+            '<div class="chat">'
+            f'<div class="ev-mark">{_esc(style["mark"])}</div>{rows}'
+            "</div>"
             f"{why}"
             "</div>",
         )
@@ -1420,7 +1528,7 @@ def _notes_html(portrait: Portrait, ctx: CardContext) -> str:
     if note:
         notes.append(note)
     if ctx.sample_size and ctx.sample_size < 20:
-        notes.append("样本偏少，结论仅作参考；多聊几天后重新生成会更准。")
+        notes.append("话不够多，这张卡就当个乐子；多聊几天再来一张会准很多。")
     if not notes:
         return ""
     body = "".join(f"<span>{_esc(text)}</span>" for text in notes)

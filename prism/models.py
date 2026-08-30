@@ -197,9 +197,16 @@ class Utterance:
     speaker: str = ""
     text: str = ""
     mine: bool = False
+    #: 这句话的时刻（HH:MM）。只为让气泡更像真截图，空串就不显示。
+    clock: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"speaker": self.speaker, "text": self.text, "mine": self.mine}
+        return {
+            "speaker": self.speaker,
+            "text": self.text,
+            "mine": self.mine,
+            "clock": self.clock,
+        }
 
 
 @dataclass(slots=True)
@@ -253,7 +260,8 @@ def _parse_dialogue(raw: Any) -> list[Utterance]:
             continue
         speaker = str(item.get("speaker") or item.get("name") or "").strip()
         mine = bool(item.get("mine")) or speaker in {SELF_SPEAKER, "本人", "我"}
-        out.append(Utterance(speaker=speaker, text=text, mine=mine))
+        clock = str(item.get("clock") or "").strip()
+        out.append(Utterance(speaker=speaker, text=text, mine=mine, clock=clock))
     return out
 
 
@@ -278,7 +286,7 @@ class Evidence:
                 mine = line.mine or name in {SELF_SPEAKER, "本人", "我"}
                 if mine:
                     name = speaker_name or SELF_SPEAKER
-                out.append(Utterance(speaker=name, text=text, mine=mine))
+                out.append(Utterance(speaker=name, text=text, mine=mine, clock=line.clock))
             if out:
                 return out
         quote = (self.quote or "").strip()

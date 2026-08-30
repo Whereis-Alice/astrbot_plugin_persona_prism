@@ -86,6 +86,23 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "notice_collect": True,
         "theme": "sakura",
     },
+    "dialogue": {
+        # 把多人对话上下文一起喂给模型：群聊本来就是对话，只看本人发言容易把
+        # "接话" 误判成 "自言自语"。默认开启。
+        "context_enabled": True,
+        "context_span": 3,
+        "max_scenes": 12,
+        "max_lines": 80,
+        "social_signals": True,
+    },
+    "persona": {
+        # 可选：借用 AstrBot 当前会话的人格来决定文案口吻（不影响结论与格式）。
+        "use_astrbot_persona": False,
+        "persona_id": "",
+        # 可选：允许其他插件的 @filter.on_llm_request 钩子（如世界树词条）往
+        # 分析请求里补充设定。会稀释「只依据语料」的约束，所以默认关闭。
+        "allow_llm_hooks": False,
+    },
     "compat": {
         "legacy_commands": True,
         "love_commands": True,
@@ -148,6 +165,14 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "persona_clone.clear_history_on_switch",
         "compat.legacy_commands",
         "compat.love_commands",
+        "dialogue.context_enabled",
+        "dialogue.context_span",
+        "dialogue.max_scenes",
+        "dialogue.max_lines",
+        "dialogue.social_signals",
+        "persona.use_astrbot_persona",
+        "persona.persona_id",
+        "persona.allow_llm_hooks",
         "love.enabled",
         "love.min_messages",
         "love.day_start_hour",
@@ -189,6 +214,9 @@ _ENUMS: dict[str, tuple[str, ...]] = {
 }
 
 _RANGES: dict[str, tuple[int, int]] = {
+    "dialogue.context_span": (0, 8),
+    "dialogue.max_scenes": (1, 40),
+    "dialogue.max_lines": (10, 300),
     "llm.retry_times": (0, 5),
     "collect.backfill_rounds": (0, 60),
     "collect.page_size": (20, 200),

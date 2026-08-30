@@ -757,6 +757,19 @@ function renderTree() {
   return box;
 }
 
+//: 对话里的「中间略」占位行，画成省略分隔而不是一条气泡。
+const GAP_HINTS = ["中间略", "此处省略", "省略部分对话"];
+
+//: 场景标题常带着 "23:11 · 深夜救火" 这种时间前缀，拆到标题栏右侧去。
+function splitSceneTitle(title, lines) {
+  const text = String(title || "").trim();
+  const matched = text.match(/^(\d{1,2}:\d{2})\s*[·:：\-—]\s*(.+)$/);
+  if (matched) return { title: matched[2].trim(), clock: matched[1] };
+  const own = (lines || []).find((line) => line && line.mine && line.clock);
+  const any = (lines || []).find((line) => line && line.clock);
+  return { title: text, clock: (own && own.clock) || (any && any.clock) || "" };
+}
+
 //: 专属头衔徽章。头衔形如「纯爱战神（反讽）」，括注单独降一号字。
 function titleBadge(raw) {
   const text = String(raw || "").trim();
@@ -769,6 +782,7 @@ function titleBadge(raw) {
     make("span", "titlebadge__glyph", "✦"),
     make("span", "titlebadge__name", name),
     note ? make("span", "titlebadge__note", "（" + note + "）") : null,
+    make("span", "titlebadge__glyph titlebadge__glyph--r", "✦"),
   ]);
   return box;
 }
@@ -1299,21 +1313,37 @@ function renderDrawer() {
     block.appendChild(make("p", "block__title", "呈堂证供"));
     for (const item of payload.evidence) {
       const box = make("div", "evidence");
-      if (item.title) box.appendChild(make("p", "evidence__title", item.title));
       const lines = (item.dialogue || []).filter((line) => line && line.text);
+      const split = splitSceneTitle(item.title || "", lines);
+      // 标题栏做成聊天窗口的样子，和卡片上的观感保持一致。
+      const bar = make("div", "evidence__bar");
+      const dots = make("span", "evidence__dots");
+      append(dots, [make("i", ""), make("i", ""), make("i", "")]);
+      append(bar, [
+        dots,
+        make("p", "evidence__title", split.title || "现场片段"),
+        split.clock ? make("span", "evidence__when", split.clock) : null,
+      ]);
+      box.appendChild(bar);
       if (lines.length) {
         // 有还原出来的现场就画成聊天气泡，没有才退回单行引用。
         const chat = make("div", "chat");
         for (const line of lines) {
+          if (GAP_HINTS.some((hint) => String(line.text).includes(hint))) {
+            chat.appendChild(make("div", "cgap", "···"));
+            continue;
+          }
           const row = make("div", line.mine ? "crow crow--mine" : "crow");
           append(row, [
             make("span", "cava", (line.speaker || "?").slice(0, 1)),
             (() => {
               const wrap = make("div", "cbody");
-              append(wrap, [
-                make("span", "cname", line.speaker || ""),
-                make("span", "cbub", line.text),
+              const name = make("span", "cname");
+              append(name, [
+                make("b", "", line.speaker || ""),
+                line.clock ? make("em", "ctime", line.clock) : null,
               ]);
+              append(wrap, [name, make("span", "cbub", line.text)]);
               return wrap;
             })(),
           ]);
@@ -1321,9 +1351,11 @@ function renderDrawer() {
         }
         box.appendChild(chat);
       } else if (item.quote) {
-        box.appendChild(make("blockquote", "", item.quote));
+        const chat = make("div", "chat");
+        chat.appendChild(make("blockquote", "", item.quote));
+        box.appendChild(chat);
       }
-      if (item.reason) box.appendChild(make("cite", "", item.reason));
+      if (item.reason) box.appendChild(make("p", "evidence__why", item.reason));
       block.appendChild(box);
     }
     body.appendChild(block);

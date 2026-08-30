@@ -37,9 +37,6 @@ TRUSTED_DEPTH = 3
 RECHECK_SHALLOW_SEC = 300
 RECHECK_DEEP_SEC = 21600
 
-#: 样本不足回复里最多贴几条诊断。全量诊断可能有 5～6 条，贴满等于又刷一屏。
-SHORTFALL_ITEM_MAX = 3
-
 #: should_recheck_exhausted 的返回值 → 给用户看的原因。
 RECHECK_REASONS: dict[str, str] = {
     "shallow": "断点太浅，「已挖到头」很可能是协议端喂回空页造成的误判",
@@ -204,10 +201,10 @@ def progress_line(
     没有发起回溯时返回空串，调用方跳过即可——本地缓存够用的情况下再刷一条纯属噪音。
     """
     if report.blocked:
-        return f"拉群历史被协议端拒绝，改用本地已存的 {sampled} 条发言分析…"
+        return f"现在拿不到群历史，先用已经记下的 {sampled} 句发言分析…"
     if not report.fetched:
         return ""
-    return f"已取到 {sampled} 条发言，正在分析…"
+    return f"已取到 {sampled} 句发言，正在分析…"
 
 
 def progress_log(
@@ -265,6 +262,28 @@ def intro_line(
     return f"正在为 {who} 生成{label}…"
 
 
+def player_hint(report: ScanReport) -> str:
+    """给普通玩家看的一句话。
+
+    满屏的重点不是“翻了几页、新入库几条”——那是给开发者看的。
+    玩家只需要知道一件事：现在词汇不够，到底是“再聊聊就行”还是
+    “得叫管理员看一眼”。完整诊断走 diagnose() 写进后台日志。
+    """
+    if not report.is_group:
+        return "私聊里没有群聊记录可看，只能靠平时聊天慢慢攒。"
+    if not report.passive_capture:
+        return "机器人现在没在记群聊，请管理员在配置里打开「被动采集」。"
+    if not report.supported:
+        return "这个平台拿不到群聊历史，只能靠之后的聊天慢慢攒。"
+    if report.error:
+        return "刚才去翻群历史没翻成功，过一会儿再试一次。"
+    if report.stalled:
+        return "这个群的历史翻不动（服务端不让往前翻），管理员可以发「棱镜诊断」看一眼。"
+    if report.exhausted:
+        return "群历史已经翻到最早一条了，能找到的就这么多。"
+    return ""
+
+
 def shortfall_reply(
     report: ScanReport,
     *,
@@ -273,22 +292,18 @@ def shortfall_reply(
     sampled: int,
     min_messages: int,
 ) -> str:
-    """样本不足时的回复：一句结论 + 采集诊断 + 可操作建议。
+    """样本不足时的回复：一句结论 + 最多一句人话提示。
 
-    上游这里只说"发言太少"，用户完全不知道回溯有没有跑。我们把判断依据摊开，
-    让人一眼看出瓶颈在群里没话、协议端不支持，还是配置关掉了采集。
+    早先这里会把整份采集诊断贴进群里（翻了几页、新入库几条、
+    message_seq 断点……），对玩家而言等于一屏乱码。现在只留他们能看懂、
+    也能真的去做的一句，翻页细节交给 diagnose() + 后台日志。
     """
     who = target_name or "TA"
-    lines = [
-        f"{who} 的有效发言只有 {sampled} 条，还不够生成{label}（至少需要 {min_messages} 条）。",
-        "采集诊断：",
-    ]
-    # 诊断条目按"最可能的瓶颈"排过序，群里只贴前几条；完整列表写进后台日志。
-    items = diagnose(report)
-    lines.extend(f"  · {item}" for item in items[:SHORTFALL_ITEM_MAX])
-    if len(items) > SHORTFALL_ITEM_MAX:
-        lines.append(f"  · （另有 {len(items) - SHORTFALL_ITEM_MAX} 条细节已写入后台日志）")
-    lines.append("建议：让 TA 多聊几句，或发「棱镜缓存」查看本群语料积累情况。")
+    lines = [f"{who} 目前只攒到 {sampled} 句发言，还凑不出{label}（至少要 {min_messages} 句）。"]
+    hint = player_hint(report)
+    if hint:
+        lines.append(hint)
+    lines.append("让 TA 多聊几句再来试试。")
     return "\n".join(lines)
 
 

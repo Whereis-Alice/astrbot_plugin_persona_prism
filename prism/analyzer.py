@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 from .models import CorpusBundle, MemberProfile, Portrait
+from .persona_link import apply_llm_hooks, resolve_persona
 from .prompts import PromptSpec, build_system_prompt, build_user_prompt
 from .titles import fallback_title, normalize_title
 
@@ -224,6 +225,19 @@ class PrismAnalyzer:
             )
         return provider
 
+    # -- AstrBot 人格 ------------------------------------------------------
+    async def persona_note(self, umo: str = "") -> str:
+        """可选：取当前会话人格，作为文案口吻提示。默认关闭。"""
+        if not self._config.bool_of("persona.use_astrbot_persona"):
+            return ""
+        info = await resolve_persona(
+            self._context,
+            umo=umo,
+            persona_id=self._config.str_of("persona.persona_id"),
+            logger=self._logger,
+        )
+        return info.to_prompt_block()
+
     # -- 主流程 ------------------------------------------------------------
     async def analyze(
         self,
@@ -237,6 +251,9 @@ class PrismAnalyzer:
         extra_facts: str = "",
         seed: str = "",
         title_fallback: bool = True,
+        dialogue_block: str = "",
+        social_block: str = "",
+        event: Any = None,
     ) -> tuple[Portrait, str]:
         """执行一次分析，返回 (画像, 模型名)。"""
         provider = self.resolve_provider(umo)
@@ -250,7 +267,17 @@ class PrismAnalyzer:
             profile_fields=self._config.profile_fields(),
             include_partners=spec.key in _PARTNER_KEYS or not spec.builtin,
             extra_facts=extra_facts,
+            dialogue_block=dialogue_block,
+            social_block=social_block,
+            persona_note=await self.persona_note(umo),
         )
+        if self._config.bool_of("persona.allow_llm_hooks"):
+            system_prompt, user_prompt = await apply_llm_hooks(
+                event,
+                system_prompt,
+                user_prompt,
+                logger=self._logger,
+            )
         model = self._config.str_of("llm.model")
         timeout = max(30, self._config.int_of("llm.timeout_sec"))
         retries = max(0, self._config.int_of("llm.retry_times"))

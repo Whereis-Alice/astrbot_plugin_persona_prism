@@ -26,7 +26,7 @@ from astrbot.core.star import StarTools
 from astrbot.core.star.filter.event_message_type import EventMessageType
 from quart import jsonify, request
 
-from .prism import cards, collector, dashboard, history, love, scanning, scenes
+from .prism import cards, collector, dashboard, dialogue, history, love, scanning, scenes
 from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
 from .prism.config import ConfigError, PrismConfig
@@ -1040,6 +1040,66 @@ class PersonaPrismStar(Star):
             logger.info("[人格棱镜] 已为 %s/%s 条证供还原聊天现场。", filled, len(items))
         return filled
 
+    async def _dialogue_context(
+        self,
+        event: AstrMessageEvent,
+        platform: str,
+        group_id: str,
+        bundle: CorpusBundle,
+        target_id: str,
+    ) -> tuple[str, str]:
+        """捞出 TA 每句话前后的群聊，拼成「对话现场」与「互动结构」两段提示。
+
+        群聊是对话：只把 TA 本人的发言喂给模型，短回复型的人很容易被误判成
+        "自言自语"。这里围绕 TA 的发言均匀取若干个时间点，把当时前后的群聊
+        一起附上；内容全部来自本地已采集的记录，逐字取用，不出网。
+        """
+        if not group_id or not bundle.messages:
+            return "", ""
+        if not self.config.bool_of("dialogue.context_enabled"):
+            return "", ""
+        span = self.config.int_of("dialogue.context_span")
+        max_scenes = self.config.int_of("dialogue.max_scenes")
+        max_lines = self.config.int_of("dialogue.max_lines")
+        stamps = sorted({int(msg.ts) for msg in bundle.messages if int(msg.ts or 0) > 0})
+        if not stamps:
+            return "", ""
+        merged: dict[str, dict[str, Any]] = {}
+        for stamp in dialogue.pick_evenly(stamps, max(1, max_scenes)):
+            try:
+                rows = await self.astore.context_rows(platform, group_id, stamp, span=600, limit=60)
+            except Exception:  # 少一段上下文而已，不能拖垮整次分析
+                continue
+            for row in rows:
+                mid = str(row.get("message_id") or "")
+                key = mid or "{}:{}".format(row.get("ts"), row.get("user_id"))
+                merged[key] = row
+        if not merged:
+            return "", ""
+        rows = sorted(merged.values(), key=lambda r: int(r.get("ts") or 0))
+        names = love.collect_names(rows)
+        self_id = ""
+        with contextlib.suppress(Exception):
+            self_id = str(event.get_self_id() or "")
+        block = dialogue.build_dialogue_block(
+            rows,
+            target_id,
+            names=names,
+            context=span,
+            max_scenes=max_scenes,
+            max_lines=max_lines,
+            self_id=self_id,
+        )
+        social = ""
+        if self.config.bool_of("dialogue.social_signals"):
+            social = dialogue.social_signals(
+                rows,
+                target_id,
+                names=names,
+                self_id=self_id,
+            ).to_prompt_block()
+        return block, social
+
     async def _execute(self, event: AstrMessageEvent, spec: PromptSpec | None):
         """一次完整的画像流程。所有指令都收敛到这里，便于统一限流与埋点。"""
         if spec is None:
@@ -1174,6 +1234,16 @@ class PersonaPrismStar(Star):
             if not target_name:
                 target_name = await self.astore.latest_user_name(platform, group_id, target_id) or target_id
 
+            dialogue_block, social_block = "", ""
+            with contextlib.suppress(Exception):
+                dialogue_block, social_block = await self._dialogue_context(
+                    event,
+                    platform,
+                    group_id,
+                    bundle,
+                    target_id,
+                )
+
             portrait, model = await self.analyzer.analyze(
                 spec,
                 bundle,
@@ -1182,6 +1252,9 @@ class PersonaPrismStar(Star):
                 profile=profile,
                 umo=event.unified_msg_origin,
                 seed=f"{platform}:{group_id}:{target_id}:{spec.key}",
+                dialogue_block=dialogue_block,
+                social_block=social_block,
+                event=event,
             )
             with contextlib.suppress(Exception):
                 await self._restore_scenes(platform, group_id, portrait, bundle, target_id)
@@ -1364,13 +1437,14 @@ class PersonaPrismStar(Star):
         *,
         covered: bool = True,
     ) -> str:
-        """样本不足时给一行短诊断，帮用户区分「真没说话」和「采集没生效」。
+        """样本不足时给一句人话，帮玩家分清「真没聊」和「没读到」。
 
-        covered=False 表示这段时间的群历史没能翻完（协议端分页不给力），
-        这种情况下「只说了 N 句」不可信，要如实说出来。
+        covered=False 表示这段时间的群历史没能翻完（協议端分页不给力），
+        这种情况下「只说了 N 句」不可信，要如实说出来。具体的库存、时间戳
+        异常数量这类细节只进日志，不往群里贴。
         """
         if not covered:
-            return "注意：本群的历史翻页没能翻到窗口起点，这段时间的发言可能没采全，可发「棱镜诊断」看采集链路。"
+            return "今天的群消息没读全，这个句数不一定准，过一会儿再试一次。"
         try:
             stats = await self.astore.corpus_stats(platform, group_id)
             health = await self.astore.corpus_ts_health(platform, group_id)
@@ -1380,12 +1454,24 @@ class PersonaPrismStar(Star):
         if day_rows:
             return ""
         if not total:
-            return "本群还没有语料，先让大家聊几句，或发「棱镜诊断」看采集是否正常。"
+            return "机器人还没开始记本群的聊天，先让大家聊几句吧。"
         bad = int(health.get("future") or 0) + int(health.get("missing") or 0)
         if bad:
-            return f"本群 {total} 条语料里有 {bad} 条时间戳异常，已尝试修正，请再发一次。"
+            logger.info(
+                "[人格棱镜] 群 %s 的 %s/%s 条语料时间戳异常，已尝试修正。",
+                group_id,
+                bad,
+                total,
+            )
+            return "刚把本群的消息时间重新对过一遍，再发一次就行了。"
         newest = _fmt_ts(stats.get("newest")) if stats.get("newest") else "未知"
-        return f"本群今天没采到发言（库里共 {total} 条，最近一条 {newest}）。"
+        logger.info(
+            "[人格棱镜] 群 %s 今日无语料（库里共 %s 条，最近一条 %s）。",
+            group_id,
+            total,
+            newest,
+        )
+        return "群里今天还没人开口，等聊热了再来。"
 
     def _love_weights(self) -> love.LoveWeights:
         return love.weights_from_sensitivity(self.config.int_of("love.sensitivity"))
@@ -1592,6 +1678,31 @@ class PersonaPrismStar(Star):
                 from_cache=True,
             )
 
+            self_id = ""
+            with contextlib.suppress(Exception):
+                self_id = str(event.get_self_id() or "")
+            names = love.collect_names(rows)
+            #: 恋爱诊断本来就把整个窗口的群聊都拿在手上，直接切成对话现场即可。
+            love_dialogue = ""
+            love_social = ""
+            if self.config.bool_of("dialogue.context_enabled"):
+                love_dialogue = dialogue.build_dialogue_block(
+                    rows,
+                    target_id,
+                    names=names,
+                    context=self.config.int_of("dialogue.context_span"),
+                    max_scenes=self.config.int_of("dialogue.max_scenes"),
+                    max_lines=self.config.int_of("dialogue.max_lines"),
+                    self_id=self_id,
+                )
+            if self.config.bool_of("dialogue.social_signals"):
+                love_social = dialogue.social_signals(
+                    rows,
+                    target_id,
+                    names=names,
+                    self_id=self_id,
+                ).to_prompt_block()
+
             llm_portrait = None
             model = ""
             if self.config.bool_of("love.llm_commentary"):
@@ -1607,12 +1718,14 @@ class PersonaPrismStar(Star):
                         seed=f"{platform}:{group_id}:{target_id}:{day}:{span}",
                         # 恋爱头衔由四维实分推导，模型不给就留空，别让称号池顶掉。
                         title_fallback=False,
+                        dialogue_block=love_dialogue,
+                        social_block=love_social,
+                        event=event,
                     )
                 except AnalyzeError as exc:
                     #: 判词写不出来不影响分数，退回纯公式文案，别让用户白等。
                     logger.warning("[人格棱镜] 恋爱判词生成失败，回退公式文案：%s", exc)
 
-            names = love.collect_names(rows)
             #: 变量名不能叫 scenes：会遮蔽同名模块，函数里后面就用不了 scenes.enrich_all。
             local_scenes = love.build_scenes(
                 rows,
@@ -1633,12 +1746,15 @@ class PersonaPrismStar(Star):
                             names=names,
                             label="现场片段",
                         )
-            scope_note = "已翻遍这段时间的群历史" if covered else "群历史未能翻到窗口起点，可能不全"
-            sample_note = (
-                f"取证范围：{window}本群共采到 {len(rows)} 条发言（{scope_note}），"
-                f"其中 {who} 名下 {len(mine)} 条 —— 统计用的是 TA 在这段时间里的全部发言，不是最近 N 条。"
-                "四维分数由本地公式实算，判词与证供解读由模型生成。"
+            #: 底部一行小字给普通玩家看，够交代取样口径就行；翻页是否覆盖完整之类的
+            #: 排查信息只写后台日志。
+            logger.info(
+                "[人格棱镜] 恋爱诊断取样：窗口 %s 条 / 本人 %s 条，历史是否覆盖窗口起点=%s",
+                len(rows),
+                len(mine),
+                covered,
             )
+            sample_note = f"取样 · {window}{who} 的全部发言 {len(mine)} 句，分数实算、判词由 AI 撰写"
             portrait = love.merge_portrait(
                 metrics,
                 llm_portrait,

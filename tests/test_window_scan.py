@@ -319,5 +319,7 @@ def test_shortfall_note_says_so_when_the_window_was_not_covered():
     note = asyncio.run(
         main.PersonaPrismStar._corpus_shortfall_note(star, "aiocqhttp", "10086", 0, covered=False),
     )
-    assert "没采全" in note
-    assert "棱镜诊断" in note
+    assert "没读全" in note
+    assert "再试一次" in note
+    #: 玩家看不懂也用不了的管理命令不往群里贴。
+    assert "棱镜诊断" not in note

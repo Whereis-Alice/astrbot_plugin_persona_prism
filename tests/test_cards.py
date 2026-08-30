@@ -275,8 +275,61 @@ def test_build_card_html_renders_evidence_as_chat_scene():
     assert 'class="crow right"' in html_out
     assert 'class="crow left"' in html_out
     assert "阿光" in html_out
-    assert "23:11 · 深夜救火" in html_out
     assert "主动接活" in html_out
+    # 标题里的时间被拆到聊天窗口的标题栏右侧，不重复在标题上。
+    assert '<span class="ev-when">23:11</span>' in html_out
+    assert 'class="ev-title">深夜救火<' in html_out
+    assert "23:11 · 深夜救火" not in html_out
+
+
+def test_evidence_scene_shows_clock_next_to_speaker():
+    portrait = _portrait(
+        evidence=[
+            Evidence(
+                quote="我来修",
+                reason="主动接活",
+                title="深夜救火",
+                dialogue=[
+                    Utterance(speaker="阿光", text="这段代码崩了", clock="23:10"),
+                    Utterance(speaker="[本人]", text="我来修", mine=True, clock="23:11"),
+                ],
+            ),
+        ],
+    )
+    html_out = cards.build_card_html(portrait, _ctx())
+    assert '<span class="ctm">23:10</span>' in html_out
+    assert '<span class="ctm">23:11</span>' in html_out
+    # 没写标题时拿本人那句的时间当窗口时间。
+    assert '<span class="ev-when">23:11</span>' in html_out
+
+
+def test_evidence_scene_renders_gap_marker_as_divider():
+    portrait = _portrait(
+        evidence=[
+            Evidence(
+                quote="我来修",
+                dialogue=[
+                    Utterance(speaker="阿光", text="这段代码崩了"),
+                    Utterance(speaker="", text="……（中间略）……"),
+                    Utterance(speaker="[本人]", text="我来修", mine=True),
+                ],
+            ),
+        ],
+    )
+    html_out = cards.build_card_html(portrait, _ctx())
+    assert 'class="cgap"' in html_out
+    assert "中间略" not in html_out
+
+
+def test_evidence_scene_keeps_own_line_when_dialogue_is_long():
+    long_dialogue = [Utterance(speaker=f"群友{i}", text=f"闲聊 {i}") for i in range(12)]
+    long_dialogue.append(Utterance(speaker="[本人]", text="关键的一句", mine=True))
+    portrait = _portrait(
+        evidence=[Evidence(quote="关键的一句", dialogue=long_dialogue)],
+    )
+    html_out = cards.build_card_html(portrait, _ctx())
+    assert "关键的一句" in html_out
+    assert html_out.count('class="crow') <= 7
 
 
 def test_build_card_html_evidence_title_follows_theme():
@@ -447,7 +500,17 @@ def test_every_theme_defines_a_title_badge_style():
     assert set(cards.TITLE_BADGE_STYLE) == set(cards.THEMES)
     for name in cards.THEMES:
         html = cards.build_card_html(_portrait(title="深夜哲学家"), _ctx(theme=name))
-        assert cards.TITLE_BADGE_STYLE[name]["cap"] in html
+        assert cards.TITLE_BADGE_STYLE[name]["glyph"] in html
+        assert cards.TITLE_BADGE_STYLE[name]["wing"] in html
+
+
+def test_title_badge_shows_no_explanatory_label():
+    #: 头衔靠形状表达身份，徽章里除了头衔本身不许再写「称号 / 专属头衔」这类说明。
+    for name in cards.THEMES:
+        html = cards.build_card_html(_portrait(title="深夜哲学家"), _ctx(theme=name))
+        badge = html.split('class="title-badge"')[1].split("</span></div>")[0]
+        for word in ("称号", "专属头衔", "封号", "代号", "本期标题", "TITLE"):
+            assert word not in badge
 
 
 def test_title_badge_is_escaped():

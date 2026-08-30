@@ -140,6 +140,38 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "恋爱卡主题",
         "hint": "恋爱诊断卡单独用的主题，默认「恋色樱粉」。选「自动挡」就按每张卡的性子临场挑。",
     },
+    "dialogue.context_enabled": {
+        "label": "读懂上下文",
+        "hint": "开启后不只看 TA 一个人说了什么，还会把前后几句别人的话一起给模型，判断谁在跟谁说话。关掉会省一点性能，但结论容易把接话看成自言自语。",
+    },
+    "dialogue.context_span": {
+        "label": "上下文条数",
+        "hint": "每个话题片段前后各带几句别人的话。3 句基本够看出来回，调太大容易让 TA 本人的声音被淹没。",
+    },
+    "dialogue.max_scenes": {
+        "label": "话题片段数",
+        "hint": "最多挑几段现场对话给模型看。片段会在整段时间里均匀抽，不会只挑最近的。",
+    },
+    "dialogue.max_lines": {
+        "label": "对话总行数",
+        "hint": "所有片段加起来的上限，防止一次塞太多内容进模型。超出时保留较新的部分。",
+    },
+    "dialogue.social_signals": {
+        "label": "统计互动结构",
+        "hint": "顺带告诉模型 TA 主动搭话多少次、被回应多少次、常跟谁互动，让「社交位置」这类结论有据可依。",
+    },
+    "persona.use_astrbot_persona": {
+        "label": "借用 AstrBot 人格口吻",
+        "hint": "开启后卡片文案会用当前会话人格的说话方式来写，评分和结构不变。默认关闭，因为人格设定五花八门，可能把正经点评写成戏精发言。",
+    },
+    "persona.persona_id": {
+        "label": "指定人格",
+        "hint": "留空就跟着当前会话的人格走；填人格名可以固定用某一个。仅在上面的开关打开时有效。",
+    },
+    "persona.allow_llm_hooks": {
+        "label": "允许其他插件补充设定",
+        "hint": "开启后世界树词条这类挂在 on_llm_request 上的插件也能给画像补充背景资料。默认关闭，避免不相干的设定干扰结论。",
+    },
     "compat.legacy_commands": {
         "label": "启用「画像」系列指令",
         "hint": "画像 / 正画像 / 负画像 / 克隆人格 / 找对象 / 查看画像 / 切换人格 / 恢复人格。与上游插件同名，同时装两个请关掉一边。",
@@ -170,6 +202,8 @@ GROUP_TITLES: dict[str, dict[str, str]] = {
     "inject": {"label": "对话注入", "icon": "chat"},
     "persona_clone": {"label": "人格克隆", "icon": "mask"},
     "love": {"label": "恋爱诊断", "icon": "heart"},
+    "dialogue": {"label": "对话理解", "icon": "users"},
+    "persona": {"label": "人格联动", "icon": "prompt"},
     "behavior": {"label": "行为", "icon": "sliders"},
     "compat": {"label": "上游兼容", "icon": "link"},
 }

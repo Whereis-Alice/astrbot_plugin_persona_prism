@@ -245,6 +245,35 @@ def test_auto_theme_follows_system_preference():
 
 
 # ---------------------------------------------------------------------------
+# 呈堂证供（聊天窗口）
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_chat_window_classes_used_in_js_all_have_css_rules():
+    """证供区改成了聊天窗口版，JS 造的 class 漏一个就漏一层样式。"""
+    used = set(re.findall(r'"(evidence__[a-z]+|chat|cgap|crow|cava|cbody|cname|ctime|cbub)"', APP_JS))
+    assert {"evidence__bar", "evidence__title", "chat", "crow", "cbub"} <= used
+    for name in sorted(used):
+        assert "." + name in STYLE_CSS, name
+
+
+def test_evidence_bar_carries_dots_title_and_clock():
+    """窗口标题栏的三个零件：小圆点、标题、右侧时间。"""
+    assert 'make("span", "evidence__dots")' in APP_JS
+    assert 'make("span", "evidence__when"' in APP_JS
+    assert "function splitSceneTitle(" in APP_JS
+    assert ".evidence__dots i" in STYLE_CSS
+
+
+def test_evidence_gap_marker_is_shared_with_the_card_renderer():
+    """卡片和 WebUI 要认同一套省略标记，否则一边显示分隔符一边显示原文。"""
+    from prism.cards import _GAP_HINTS
+
+    hints = set(re.findall(r'"([^"]+)"', re.search(r"GAP_HINTS = \[(.*?)\]", APP_JS, re.S).group(1)))
+    assert hints == set(_GAP_HINTS)
+
+
+# ---------------------------------------------------------------------------
 # 卡片灯箱
 # ---------------------------------------------------------------------------
 

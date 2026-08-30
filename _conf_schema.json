@@ -501,6 +501,66 @@
       }
     }
   },
+  "dialogue": {
+    "description": "对话上下文",
+    "type": "object",
+    "items": {
+      "context_enabled": {
+        "description": "把多人对话一起交给模型",
+        "type": "bool",
+        "default": true,
+        "hint": "群聊本来是对话。开启后除了 TA 本人的发言，还会附上 TA 每句话前后的几句群聊（全部取自本地已采集的记录），模型才看得出 TA 是在接话还是在自说自话。别人的话只用于理解上下文，不会被当成 TA 的性格证据，卡片里引用的原话也仍然只会是 TA 本人说的。关掉可以省一点 token，但准确度会下降。"
+      },
+      "context_span": {
+        "description": "每句话前后各带几句",
+        "type": "int",
+        "default": 3,
+        "hint": "数字越大越能看清前因后果，也越费 token。3 通常够用。"
+      },
+      "max_scenes": {
+        "description": "最多展开几个对话片段",
+        "type": "int",
+        "default": 12,
+        "hint": "片段会在整段时间里均匀抽取，而不是全挤在最近几分钟。"
+      },
+      "max_lines": {
+        "description": "对话上下文总行数上限",
+        "type": "int",
+        "default": 80,
+        "hint": "超出时优先保留较新的对话。"
+      },
+      "social_signals": {
+        "description": "附带互动统计",
+        "type": "bool",
+        "default": true,
+        "hint": "把「谁接了 TA 的话、TA 接了谁的话、被 @ 了几次」这类本地精确计数告诉模型，用来判断社交位置，比让模型自己猜可靠得多。"
+      }
+    }
+  },
+  "persona": {
+    "description": "人格与外部注入",
+    "type": "object",
+    "items": {
+      "use_astrbot_persona": {
+        "description": "用当前人格的口吻写文案",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后所有玩法的文案会照着 AstrBot 当前会话正在用的人格来写（语气、用词、自称）。只影响措辞，不影响评分、结论和卡片格式。会话里显式关掉人格时自动跳过。"
+      },
+      "persona_id": {
+        "description": "指定人格 ID",
+        "type": "string",
+        "default": "",
+        "hint": "留空 = 跟随当前会话正在用的人格。填了则所有玩法固定用这一个人格的口吻。"
+      },
+      "allow_llm_hooks": {
+        "description": "允许其他插件补充设定",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后会把分析请求也交给别的插件的 LLM 注入钩子过一遍（例如 astrbot_plugin_worldtree_lore 的世界观词条），适合有自建世界观设定的群。代价是模型会看到语料之外的内容，画像的严谨性下降，所以默认关闭。"
+      }
+    }
+  },
   "compat": {
     "description": "上游兼容",
     "type": "object",

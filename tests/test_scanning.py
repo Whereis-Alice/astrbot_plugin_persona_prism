@@ -103,7 +103,7 @@ def test_progress_line_keeps_only_the_sample_count():
         label="人格棱镜",
         sampled=300,
     )
-    assert line == "已取到 300 条发言，正在分析…"
+    assert line == "已取到 300 句发言，正在分析…"
     assert "8 页" not in line
     assert "1600" not in line
 
@@ -127,8 +127,10 @@ def test_progress_line_explains_protocol_rejection():
         label="人格棱镜",
         sampled=42,
     )
-    assert "拒绝" in line
-    assert "42 条" in line
+    assert "拿不到群历史" in line
+    #: 对玩家只说结果，不提“协议端”这种开发者术语。
+    assert "协议端" not in line
+    assert "42 句" in line
     #: 协议端的原始报错属于排查细节，写日志就好，别贴进群里。
     assert "unsupported action" not in line
 
@@ -205,12 +207,43 @@ def test_shortfall_reply_always_has_counts_and_advice():
         sampled=6,
         min_messages=20,
     )
-    assert "6 条" in text
-    assert "20 条" in text
-    assert "采集诊断：" in text
-    assert "棱镜缓存" in text
-    #: 回溯确实跑过就要把数字摊出来，否则用户还是不知道有没有轮询成功。
-    assert "1600" in text
+    assert "6 句" in text
+    assert "20 句" in text
+    assert "多聊几句" in text
+    #: 翻页细节是开发者才关心的东西，群里不再贴。
+    assert "1600" not in text
+    assert "入库" not in text
+    assert "采集诊断" not in text
+
+
+def test_shortfall_reply_flags_actionable_problems_in_plain_words():
+    #: 管理员能动手解决的那几种情况要说人话，而不是堆术语。
+    off = scanning.shortfall_reply(
+        _report(passive_capture=False),
+        target_name="狐狸",
+        label="人格棱镜",
+        sampled=2,
+        min_messages=20,
+    )
+    assert "被动采集" in off
+    stalled = scanning.shortfall_reply(
+        _report(attempted=True, pages=3, stalled=True),
+        target_name="狐狸",
+        label="人格棱镜",
+        sampled=2,
+        min_messages=20,
+    )
+    assert "棱镜诊断" in stalled
+    assert "message_seq" not in stalled
+    quiet = scanning.shortfall_reply(
+        _report(attempted=True, pages=8, scanned=1600, added=430),
+        target_name="狐狸",
+        label="人格棱镜",
+        sampled=6,
+        min_messages=20,
+    )
+    #: 一切正常、就是话少时，只留结论 + 一句建议。
+    assert quiet.count("\n") == 1
 
 
 def test_diagnose_private_chat():

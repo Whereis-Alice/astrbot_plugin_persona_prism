@@ -269,4 +269,5 @@ def test_json_contract_demands_quotable_evidence_and_low_confidence() -> None:
 def test_json_contract_describes_scene_dialogue() -> None:
     assert "dialogue" in JSON_CONTRACT
     assert "[本人]" in JSON_CONTRACT
-    assert "前后各 1 句" in JSON_CONTRACT
+    assert "前后各 1 到 2 句" in JSON_CONTRACT
+    assert "对话现场" in JSON_CONTRACT

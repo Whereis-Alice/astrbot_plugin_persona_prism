@@ -894,34 +894,52 @@ textarea {
   font-family: var(--font-mono);
 }
 
+/* 头衔勋章：跟卡片上是同一套语言 —— 绶带尖角 + 内描边，不写任何说明文字。 */
 .titlebadge {
+  position: relative;
   display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  padding: 3px 11px 4px;
-  border-radius: var(--radius-pill);
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px 11px;
+  border-radius: 6px 6px 2px 2px;
   border: 1px solid var(--accent);
   background: var(--accent-soft);
   color: var(--text);
   max-width: 100%;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 72%, 0 100%);
+}
+
+.titlebadge::before {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  opacity: 0.22;
+  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 70%, 0 100%);
+  pointer-events: none;
 }
 
 .titlebadge__glyph {
   font-size: var(--step--2);
-  opacity: 0.8;
+  opacity: 0.72;
+  transform: translateY(-3px);
 }
 
 .titlebadge__name {
-  font-weight: 650;
+  font-weight: 700;
   font-size: var(--step--1);
+  letter-spacing: 0.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform: translateY(-3px);
 }
 
 .titlebadge__note {
   font-size: var(--step--2);
   color: var(--text-2);
+  transform: translateY(-2px);
 }
 
 .record__title {
@@ -1509,42 +1527,94 @@ textarea {
   font-style: normal;
 }
 
-/* 呈堂证供：把还原出来的现场画成聊天气泡，和卡片上的观感保持一致。 */
+/* 呈堂证供：做成一扇聊天窗口（标题栏 + 气泡区 + 一句点评），和卡片上的版式一致。 */
 .evidence {
-  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  border-radius: var(--radius-md);
   background: var(--surface-2);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
+  overflow: hidden;
 }
 
+.evidence__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px var(--space-3);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-3, var(--surface-2)));
+  border-bottom: 1px solid var(--border);
+}
+
+.evidence__dots {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.evidence__dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.5;
+}
+
+.evidence__dots i:nth-child(2) { opacity: 0.34; }
+.evidence__dots i:nth-child(3) { opacity: 0.2; }
+
 .evidence__title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: var(--step--1);
   font-weight: 650;
   color: var(--text-2);
   letter-spacing: 0.04em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.evidence blockquote {
-  margin: 0;
-  font-size: var(--step-0);
-  line-height: 1.65;
-}
-
-.evidence cite {
+.evidence__when {
+  flex: 0 0 auto;
   font-size: var(--step--2);
   color: var(--text-3);
-  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.evidence__why {
+  margin: 0;
+  padding: 9px var(--space-3) 10px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--step--2);
+  color: var(--text-3);
   line-height: 1.6;
+}
+
+.evidence__why::before {
+  content: "↳";
+  margin-right: 6px;
+  color: var(--accent);
 }
 
 .chat {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 9px;
+  padding: var(--space-3);
+  background: var(--surface-1, #fff);
+}
+
+.chat blockquote {
+  margin: 0;
+  font-size: var(--step-0);
+  line-height: 1.65;
+}
+
+.cgap {
+  align-self: center;
+  font-size: var(--step--2);
+  letter-spacing: 0.34em;
+  color: var(--text-3);
+  opacity: 0.8;
 }
 
 .crow {
@@ -1583,14 +1653,36 @@ textarea {
 }
 
 .cname {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
   font-size: var(--step--2);
   color: var(--text-3);
+}
+
+.crow--mine .cname {
+  flex-direction: row-reverse;
+}
+
+.cname b {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.ctime {
+  font-style: normal;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
 }
 
 .cbub {
   padding: 7px 11px;
   border-radius: 12px;
-  background: var(--surface-1, #fff);
+  background: var(--surface-2);
   border: 1px solid var(--border);
   font-size: var(--step--1);
   line-height: 1.6;
