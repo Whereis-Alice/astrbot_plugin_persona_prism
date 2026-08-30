@@ -209,6 +209,62 @@ def test_plain_portrait_is_unstructured_with_low_confidence() -> None:
     assert portrait.confidence == pytest.approx(0.35)
 
 
+# -- 专属头衔 ---------------------------------------------------------------
+
+
+def test_build_portrait_cleans_the_model_title() -> None:
+    portrait = build_portrait(
+        {"headline": "标题", "title": "「头衔：深夜哲学家」"},
+        kind="portrait",
+        bundle=_bundle(),
+        min_messages=20,
+    )
+    assert portrait.title == "深夜哲学家"
+
+
+def test_build_portrait_invents_a_title_when_the_model_skips_it() -> None:
+    from astrbot_plugin_persona_prism.prism import titles
+
+    portrait = build_portrait(
+        {"headline": "标题"},
+        kind="roast",
+        bundle=_bundle(),
+        min_messages=20,
+        seed="g:u",
+    )
+    assert portrait.title in titles.KIND_TITLES["roast"]
+
+
+def test_build_portrait_title_can_come_from_a_peak_dimension() -> None:
+    portrait = build_portrait(
+        {"headline": "标题", "dimensions": [{"name": "话密度", "score": 97}, {"name": "克制", "score": 20}]},
+        kind="portrait",
+        bundle=_bundle(),
+        min_messages=20,
+    )
+    assert portrait.title == "话密度满格"
+
+
+def test_build_portrait_can_leave_the_title_empty_for_love() -> None:
+    """恋爱诊断自己按四维推头衔，这里必须留空，别被称号池顶掉。"""
+    portrait = build_portrait(
+        {"headline": "标题"},
+        kind="love",
+        bundle=_bundle(),
+        min_messages=20,
+        title_fallback=False,
+    )
+    assert portrait.title == ""
+
+
+def test_plain_portrait_gets_a_title_too() -> None:
+    assert plain_portrait("长文", kind="legacy_portrait", seed="s").title
+
+
+def test_plain_portrait_title_can_be_suppressed() -> None:
+    assert plain_portrait("长文", kind="love", title_fallback=False).title == ""
+
+
 # -- provider 选取 ----------------------------------------------------------
 
 

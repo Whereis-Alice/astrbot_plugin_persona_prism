@@ -23,6 +23,7 @@ from typing import Any
 
 from .models import Dimension, Evidence, Portrait, Section, Tag, Term
 from .scenes import rows_to_utterances
+from .titles import love_title, normalize_title
 
 #: 归一化曲线的默认斜率。normalize(20)≈46、normalize(50)≈84。
 DEFAULT_SLOPE = 0.05
@@ -917,6 +918,7 @@ def fallback_portrait(
     return Portrait(
         kind="love",
         headline=headline_of(metrics, seed=seed),
+        title=love_title(metrics, seed=seed),
         tags=[Tag(label, polarity) for label in metrics.archetype.tags],
         dimensions=love_dimensions(metrics),
         sections=sections,
@@ -974,6 +976,8 @@ def merge_portrait(
     return Portrait(
         kind="love",
         headline=llm.headline.strip() or base.headline,
+        # 头衔：模型给的优先（更贴当次判词），洗不出来就退回公式推的那枚。
+        title=normalize_title(llm.title) or base.title,
         tags=llm.tags or [Tag(label, polarity) for label in metrics.archetype.tags],
         dimensions=love_dimensions(metrics),
         sections=sections or base.sections,

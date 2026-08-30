@@ -293,6 +293,8 @@ class Portrait:
 
     kind: str = "portrait"
     headline: str = ""
+    #: 专属头衔：挂在名字旁边的一枚称号（如「纯爱战神（反讽）」）。空串表示不显示。
+    title: str = ""
     tags: list[Tag] = field(default_factory=list)
     dimensions: list[Dimension] = field(default_factory=list)
     sections: list[Section] = field(default_factory=list)
@@ -309,6 +311,7 @@ class Portrait:
         return {
             "kind": self.kind,
             "headline": self.headline,
+            "title": self.title,
             "tags": [{"label": t.label, "polarity": t.polarity} for t in self.tags],
             "dimensions": [{"name": d.name, "score": d.score, "note": d.note} for d in self.dimensions],
             "sections": [{"title": s.title, "body": s.body} for s in self.sections],
@@ -335,6 +338,7 @@ class Portrait:
         return cls(
             kind=str(data.get("kind") or "portrait"),
             headline=str(data.get("headline") or ""),
+            title=str(data.get("title") or ""),
             tags=[
                 Tag(str(t.get("label") or ""), str(t.get("polarity") or "neutral"))
                 for t in data.get("tags") or []
@@ -382,11 +386,14 @@ class Portrait:
             structured=bool(data.get("structured", True)),
         )
 
-    def to_plain_text(self, title: str) -> str:
-        """纯文本兜底输出。"""
+    def to_plain_text(self, heading: str) -> str:
+        """纯文本兜底输出。heading 是卡片抬头（玩法名 + 昵称），与专属头衔无关。"""
         if not self.structured and self.raw_text:
-            return f"{title}\n\n{self.raw_text.strip()}"
-        lines: list[str] = [title]
+            return f"{heading}\n\n{self.raw_text.strip()}"
+        lines: list[str] = [heading]
+        if self.title:
+            lines.append("")
+            lines.append(f"头衔：{self.title}")
         if self.headline:
             lines.append("")
             lines.append(self.headline)
@@ -500,6 +507,7 @@ class PortraitRecord:
             "kind": self.kind,
             "kind_label": self.kind_label or self.kind,
             "theme": self.theme,
+            "title": str(self.payload.get("title") or "")[:40],
             "headline": str(self.payload.get("headline") or "")[:160],
             "tags": [
                 str(t.get("label") or "") for t in self.payload.get("tags") or [] if isinstance(t, dict)

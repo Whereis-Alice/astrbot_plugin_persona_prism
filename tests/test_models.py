@@ -114,6 +114,7 @@ def _portrait() -> Portrait:
         evidence=[Evidence("今天把风车修好了", "体现动手倾向")],
         advice=["可以多参与话题发起"],
         confidence=0.7123,
+        title="风车守夜人（自称）",
     )
 
 
@@ -150,6 +151,7 @@ def test_from_dict_tolerates_empty_payload() -> None:
 def test_to_plain_text_renders_all_blocks() -> None:
     text = _portrait().to_plain_text("【人格画像】阿狸")
     assert text.startswith("【人格画像】阿狸")
+    assert "头衔：风车守夜人（自称）" in text
     assert "标签：动手派 / 夜猫子" in text
     assert "【说话风格】" in text
     assert "【现场证供】" in text

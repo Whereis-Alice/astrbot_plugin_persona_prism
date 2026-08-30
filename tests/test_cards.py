@@ -401,3 +401,55 @@ def test_renderer_survives_broken_config(tmp_path):
     assert renderer._scale() == 2.0
     assert renderer._image_format() == "jpeg"
     assert renderer._font_setting() == ("", "", "")
+
+
+# ---------------------------------------------------------------------------
+# 专属头衔徽章
+# ---------------------------------------------------------------------------
+
+
+def test_card_renders_the_portrait_title_as_a_badge():
+    html = cards.build_card_html(_portrait(title="深夜哲学家"), _ctx())
+    assert 'class="title-badge"' in html
+    assert "深夜哲学家" in html
+    assert ".title-badge {" in html
+
+
+def test_card_title_badge_splits_the_trailing_note():
+    html = cards.build_card_html(_portrait(title="纯爱战神（反讽）"), _ctx())
+    assert 'class="tb-name">纯爱战神<' in html
+    assert 'class="tb-note">反讽<' in html
+
+
+def test_card_title_badge_keeps_a_bare_title_whole():
+    html = cards.build_card_html(_portrait(title="（哲学家）"), _ctx())
+    #: 只剩括注时不该把正文抠空，整串照原样显示。
+    assert 'class="tb-name">（哲学家）<' in html
+
+
+def test_card_without_a_title_has_no_badge():
+    html = cards.build_card_html(_portrait(title=""), _ctx())
+    assert 'class="title-badge"' not in html
+
+
+def test_card_context_title_badge_is_used_when_portrait_has_none():
+    html = cards.build_card_html(_portrait(title=""), _ctx(title_badge="备用头衔"))
+    assert "备用头衔" in html
+
+
+def test_markdown_card_renders_the_context_title_badge():
+    html = cards.build_markdown_card_html("## 小结\n话很多。", _ctx(title_badge="长文观察员"))
+    assert 'class="title-badge"' in html
+    assert "长文观察员" in html
+
+
+def test_every_theme_defines_a_title_badge_style():
+    assert set(cards.TITLE_BADGE_STYLE) == set(cards.THEMES)
+    for name in cards.THEMES:
+        html = cards.build_card_html(_portrait(title="深夜哲学家"), _ctx(theme=name))
+        assert cards.TITLE_BADGE_STYLE[name]["cap"] in html
+
+
+def test_title_badge_is_escaped():
+    html = cards.build_card_html(_portrait(title="<script>x</script>"), _ctx())
+    assert "<script>" not in html

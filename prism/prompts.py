@@ -30,6 +30,7 @@ BUILTIN_PROMPT_FILE = Path(__file__).resolve().parent.parent / "prompts" / "buil
 JSON_CONTRACT = """请只输出一个 JSON 对象，不要输出任何解释文字，也不要包在代码块里。字段如下：
 {
   "headline": "一句话总结，不超过 30 字",
+  "title": "专属头衔，4 到 10 字，像游戏结算界面的称号，可带一个括注，例如「深夜哲学家（自称）」",
   "tags": [{"label": "标签词", "polarity": "positive | neutral | negative"}],
   "dimensions": [{"name": "维度名", "score": 0-100 的整数, "note": "一句话依据"}],
   "sections": [{"title": "小标题", "body": "正文"}],
@@ -44,6 +45,7 @@ JSON_CONTRACT = """请只输出一个 JSON 对象，不要输出任何解释文�
 }
 硬性规则：
 - 所有字符串使用中文，除非语料本身是外文。
+- title 是挂在名字旁边的一枚称号：要短、要好记、要能被本人当成梗转发；不要写成一句话，也不要带句号。
 - evidence 里的 quote 与 dialogue 必须逐字来自语料，禁止改写、润色、翻译或虚构；找不到合适片段时输出空数组。
 - dialogue 用来还原聊天现场：把被引用的那句话连同它前后各 1 句一起按时间顺序列出（一般 2 到 4 句）。
   被分析者本人的发言，speaker 必须写 [本人]；其他人的发言，speaker 必须是语料里真实出现过的昵称，不要另起代号。

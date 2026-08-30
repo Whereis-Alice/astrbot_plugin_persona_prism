@@ -725,3 +725,36 @@ def test_day_inputs_from_store_rows_end_to_end(store: PrismStore) -> None:
     assert metrics.vibe > 0
     assert love.collect_names(rows)["A"] == "阿狸"
 
+
+# ---------------------------------------------------------------------------
+# 专属头衔
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_portrait_carries_a_formula_title() -> None:
+    from astrbot_plugin_persona_prism.prism import titles as prism_titles
+
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=40, text_len_total=800))
+    card = love.fallback_portrait(metrics, target_name="阿狸", seed="s")
+    assert card.title == prism_titles.love_title(metrics, seed="s")
+    assert card.title
+
+
+def test_merge_portrait_prefers_the_model_title() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=10))
+    llm = Portrait(structured=True, headline="上头了", title="头衔：夜聊冠军")
+    card = love.merge_portrait(metrics, llm, seed="s")
+    assert card.title == "夜聊冠军"
+
+
+def test_merge_portrait_falls_back_when_model_title_is_a_sentence() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=10))
+    llm = Portrait(structured=True, headline="上头了", title="这个人今天特别热情，主动搭话很多次。")
+    card = love.merge_portrait(metrics, llm, seed="s")
+    assert card.title == love.fallback_portrait(metrics, seed="s").title
+
+
+def test_merge_portrait_keeps_formula_title_for_unstructured_model_output() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=10))
+    card = love.merge_portrait(metrics, Portrait(structured=False, raw_text="上头"), seed="s")
+    assert card.title == love.fallback_portrait(metrics, seed="s").title

@@ -35,7 +35,11 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.2.2"
+PLUGIN_VERSION = "v1.2.3"
+
+#: 同一个群、同一个统计窗口，多少秒内不重复出网补齐历史。
+#: 连着发几条指令（或排行榜紧跟单人诊断）时不必把群历史再翻一遍。
+WINDOW_SCAN_TTL = 30
 
 #: 内置提示词对应的指令（与 prompts/builtin_prompts.yaml 一一对应），
 #: 用于「保留指令」校验与帮助表。前 6 条是本插件的结构化卡片玩法，
@@ -221,6 +225,8 @@ class PersonaPrismStar(Star):
         self._param_style: dict[str, str] = {}
         #: 已做过时间戳自愈的「平台:群」，同一进程内不重复扫。
         self._ts_repaired: set[str] = set()
+        #: 窗口回溯的节流表。key 是「平台:群:窗口起点」，值是 (上次时间, 窗口是否盖满)。
+        self._window_scan: dict[str, tuple[float, bool]] = {}
         #: 节流告警的上次时间。key 是告警类别。
         self._warn_at: dict[str, float] = {}
 
@@ -540,30 +546,131 @@ class PersonaPrismStar(Star):
             page_size=max(20, self.config.int_of("collect.page_size")),
         )
 
-    async def _topup_latest(self, event: AstrMessageEvent, platform: str, group_id: str) -> int:
-        """无条件补拉最新一页群历史，返回新入库条数。
+    async def _cover_window(
+        self,
+        event: AstrMessageEvent,
+        platform: str,
+        group_id: str,
+        start_ts: int,
+    ) -> tuple[int, int, bool]:
+        """从最新一页往前翻群历史，直到翻过 start_ts —— 让「这段时间的发言」是全的。
 
-        为什么不复用 _backfill：那条路上有一堆前置门槛 —— 库里条数够了就整段跳过、
-        断点被标成 exhausted 时要等冷却、还要按目标条数决定翻几页。这些门槛对「按天
-        结算」是致命的：老群库里早就攒够几百条，于是永远不出网，今天说的话一条都进不来，
-        表现就是「今天只说了 0 句」而画像却完全正常（画像不按时间筛）。
+        返回 (翻了几页, 新入库几条, 窗口是否已被完整覆盖)。
 
-        这里只做一件事：拿最新一页、清洗、入库。不读也不写回溯断点，因此和主动回溯
-        互不干扰，可以随时调用。
+        为什么不能只补拉最新一页：一页是**全群**最新的 page_size 条。活跃群里目标本人
+        今天说的话很容易被别人的几百条挤到一页之外，于是窗口里一条都筛不到，表现就是
+        「今天只说了 0 句」—— 这也正是画像要翻很多轮的原因。这里按时间收敛：只要某一页
+        里出现了早于窗口起点的消息，窗口就一定被盖满了，可以立刻停手，所以安静的群
+        一次请求就够，活跃的群才会多翻几页。
+
+        与 _backfill 的分工：那条路是「为画像攒够 N 条」，游标从库里的深挖断点
+        往更早翻；这里是「补齐一段时间窗」，永远从最新一页往回走，也不改写深挖断点，
+        两者互不干扰。
         """
         if not group_id or not scanning.supports_backfill(platform, group_id):
-            return 0
+            return 0, 0, False
         client = getattr(event, "bot", None)
         if client is None:
-            return 0
+            return 0, 0, False
+
+        key = f"{platform}:{group_id}:{int(start_ts)}"
+        cached = self._window_scan.get(key)
+        if cached and time.time() - cached[0] < WINDOW_SCAN_TTL:
+            #: 同一个窗口刚翻过（多人连着发指令、或排行榜紧跟着单人诊断），别重复出网。
+            return 0, 0, cached[1]
+
+        rounds = max(1, self.config.int_of("collect.backfill_rounds"))
         page_size = max(20, self.config.int_of("collect.page_size"))
-        try:
-            messages = await self._fetch_history_page(client, platform, group_id, None, page_size)
-        except Exception as exc:
-            logger.debug("[人格棱镜] 补拉最新一页群历史失败：%s", exc)
-            return 0
-        if not messages:
-            return 0
+        locked = history.normalize_strategy(self.config.str_of("collect.cursor_field"))
+        auto = not locked
+        state = await self.astore.get_scan_state(platform, group_id)
+        strategy = (
+            locked
+            or history.normalize_strategy(state.get("cursor_field"))
+            or history.STRATEGIES[0]
+        )
+        tried: set[str] = set()
+        cursor: int | None = None
+        prev_ids: set[str] = set()
+        pages = 0
+        added = 0
+        covered = False
+
+        for _ in range(rounds):
+            try:
+                messages = await self._fetch_history_page(
+                    client,
+                    platform,
+                    group_id,
+                    cursor,
+                    page_size,
+                )
+            except Exception as exc:
+                logger.debug("[人格棱镜] 窗口回溯拉取群历史失败：%s", exc)
+                break
+            if not messages:
+                #: 再往前没有了。窗口能覆盖到的都覆盖到了，按「已盖满」处理。
+                covered = True
+                break
+            page_ids = history.page_ids(messages)
+            if prev_ids and not (page_ids - prev_ids):
+                #: 整页都是上一页看过的 —— 游标没生效。换一种翻页方式重试。
+                switched = self._rotate_window_cursor(messages, strategy, tried, cursor) if auto else None
+                if switched is None:
+                    break
+                cursor, strategy = switched
+                continue
+            prev_ids = page_ids
+            pages += 1
+            added += await self._ingest_history_page(platform, group_id, messages)
+            oldest = self._page_oldest_ts(messages)
+            if oldest and oldest < start_ts:
+                covered = True
+                break
+            nxt = history.cursor_of(messages, strategy)
+            if nxt is None or nxt == cursor:
+                switched = self._rotate_window_cursor(messages, strategy, tried, cursor) if auto else None
+                if switched is None:
+                    break
+                cursor, strategy = switched
+                continue
+            cursor = nxt
+
+        if pages:
+            logger.info(
+                "[人格棱镜] 群 %s 窗口回溯：翻了 %s 页（每页 %s 条），新入库 %s 条，窗口%s",
+                group_id,
+                pages,
+                page_size,
+                added,
+                "已盖满" if covered else "仍可能不全",
+            )
+        self._window_scan[key] = (time.time(), covered)
+        return pages, added, covered
+
+    def _rotate_window_cursor(
+        self,
+        messages: Any,
+        strategy: str,
+        tried: set[str],
+        cursor: int | None,
+    ) -> tuple[int, str] | None:
+        """窗口回溯翻不动时换一种翻页方式，拿当前这页重算游标。"""
+        tried.add(strategy)
+        for cand in history.rotate_strategies(strategy, tried):
+            value = history.cursor_of(messages, cand)
+            if value is not None and value != cursor:
+                return value, cand
+        return None
+
+    @staticmethod
+    def _page_oldest_ts(messages: Any) -> int:
+        """这一页最早那条消息的秒级时间戳（顺手把毫秒量级折算回来）。"""
+        oldest, _ = history.page_time_range(messages)
+        return collector.to_epoch_seconds(oldest) if oldest else 0
+
+    async def _ingest_history_page(self, platform: str, group_id: str, messages: Any) -> int:
+        """清洗一页群历史并入库，返回新增条数。纯图 / 极短消息按互动信号保留。"""
         rows = collector.parse_history_page(messages)
         rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
         cleaned = collector.clean_rows(
@@ -574,18 +681,13 @@ class PersonaPrismStar(Star):
             redact=self.config.bool_of("privacy.redact_pii"),
             keep_media=True,
         )
-        added = 0
-        if cleaned:
-            with contextlib.suppress(Exception):
-                added = int(await self.astore.add_messages(platform, group_id, cleaned) or 0)
-        seen = len(messages) if isinstance(messages, (list, tuple)) else 0
-        logger.info(
-            "[人格棱镜] 群 %s 补拉最新一页群历史：看到 %s 条，新入库 %s 条",
-            group_id,
-            seen,
-            added,
-        )
-        return added
+        if not cleaned:
+            return 0
+        try:
+            return int(await self.astore.add_messages(platform, group_id, cleaned) or 0)
+        except Exception as exc:
+            logger.debug("[人格棱镜] 窗口回溯入库失败：%s", exc)
+            return 0
 
     async def _backfill(
         self,
@@ -1079,6 +1181,7 @@ class PersonaPrismStar(Star):
                 group_name=group_name,
                 profile=profile,
                 umo=event.unified_msg_origin,
+                seed=f"{platform}:{group_id}:{target_id}:{spec.key}",
             )
             with contextlib.suppress(Exception):
                 await self._restore_scenes(platform, group_id, portrait, bundle, target_id)
@@ -1135,6 +1238,7 @@ class PersonaPrismStar(Star):
                 span_days=bundle.stats.span_days,
                 show_evidence=self.config.bool_of("render.show_evidence"),
                 show_avatar=self.config.bool_of("render.show_avatar"),
+                title_badge=portrait.title,
             )
             record_key = f"{spec.key}_{record_id}"
             layout = normalize_layout(spec.layout, spec.structured)
@@ -1257,8 +1361,16 @@ class PersonaPrismStar(Star):
         platform: str,
         group_id: str,
         day_rows: int,
+        *,
+        covered: bool = True,
     ) -> str:
-        """样本不足时给一行短诊断，帮用户区分「真没说话」和「采集没生效」。"""
+        """样本不足时给一行短诊断，帮用户区分「真没说话」和「采集没生效」。
+
+        covered=False 表示这段时间的群历史没能翻完（协议端分页不给力），
+        这种情况下「只说了 N 句」不可信，要如实说出来。
+        """
+        if not covered:
+            return "注意：本群的历史翻页没能翻到窗口起点，这段时间的发言可能没采全，可发「棱镜诊断」看采集链路。"
         try:
             stats = await self.astore.corpus_stats(platform, group_id)
             health = await self.astore.corpus_ts_health(platform, group_id)
@@ -1412,6 +1524,9 @@ class PersonaPrismStar(Star):
             if not self.config.bool_of("behavior.quiet_progress"):
                 yield event.plain_result(f"正在给 {who} 做{window}恋爱诊断…")
 
+            #: 先把这段时间的群历史补全再统计。只筛「库里已有的」是不行的：一页历史是
+            #: 全群最新的两百条，本人今天的发言很容易被别人挤出去，于是窗口里一条不剩。
+            _, _, covered = await self._cover_window(event, platform, group_id, start)
             stats, rows = await self._love_day_stats(
                 platform,
                 group_id,
@@ -1421,20 +1536,6 @@ class PersonaPrismStar(Star):
                 days=span,
             )
             mine = [row for row in rows if str(row.get("user_id") or "") == target_id]
-            if len(mine) < min_messages:
-                #: 窗口内的语料还没进库（刚装上、或库里已经攒够 max_messages 导致回溯不出网）。
-                #: 无条件补拉最新一页群历史再重算 —— 这是「今天恒 0 句」最常见的成因。
-                topped = await self._topup_latest(event, platform, group_id)
-                if topped:
-                    stats, rows = await self._love_day_stats(
-                        platform,
-                        group_id,
-                        day=day,
-                        start=start,
-                        end=end,
-                        days=span,
-                    )
-                    mine = [row for row in rows if str(row.get("user_id") or "") == target_id]
 
             logger.info(
                 "[人格棱镜] 恋爱诊断：%s 于 %s（%s）有效发言 %s 条（同窗口本群 %s 条 / %s 人）",
@@ -1447,7 +1548,12 @@ class PersonaPrismStar(Star):
             )
             if len(mine) < min_messages:
                 error = "样本不足"
-                note = await self._corpus_shortfall_note(platform, group_id, len(rows))
+                note = await self._corpus_shortfall_note(
+                    platform,
+                    group_id,
+                    len(rows),
+                    covered=covered,
+                )
                 text = (
                     f"{who} {window}只说了 {len(mine)} 句，样本不够出诊断"
                     f"（至少 {min_messages} 句）。多聊几句，或者加个天数试试：恋爱诊断 7 天。"
@@ -1498,6 +1604,9 @@ class PersonaPrismStar(Star):
                         profile=profile,
                         umo=event.unified_msg_origin,
                         extra_facts=love.metrics_prompt_block(metrics, target_name=target_name),
+                        seed=f"{platform}:{group_id}:{target_id}:{day}:{span}",
+                        # 恋爱头衔由四维实分推导，模型不给就留空，别让称号池顶掉。
+                        title_fallback=False,
                     )
                 except AnalyzeError as exc:
                     #: 判词写不出来不影响分数，退回纯公式文案，别让用户白等。
@@ -1524,8 +1633,10 @@ class PersonaPrismStar(Star):
                             names=names,
                             label="现场片段",
                         )
+            scope_note = "已翻遍这段时间的群历史" if covered else "群历史未能翻到窗口起点，可能不全"
             sample_note = (
-                f"取证范围：{window}本群 {len(rows)} 条发言，其中 {who} 名下 {len(mine)} 条。"
+                f"取证范围：{window}本群共采到 {len(rows)} 条发言（{scope_note}），"
+                f"其中 {who} 名下 {len(mine)} 条 —— 统计用的是 TA 在这段时间里的全部发言，不是最近 N 条。"
                 "四维分数由本地公式实算，判词与证供解读由模型生成。"
             )
             portrait = love.merge_portrait(
@@ -1585,6 +1696,7 @@ class PersonaPrismStar(Star):
                 span_days=span,
                 show_evidence=self.config.bool_of("render.show_evidence"),
                 show_avatar=self.config.bool_of("render.show_avatar"),
+                title_badge=portrait.title,
             )
             result = await self.renderer.render(portrait, ctx, record_key=f"love_{record_id}")
             backend = result.backend
@@ -1659,6 +1771,8 @@ class PersonaPrismStar(Star):
 
         day, start, end, span = self._love_window(days)
         window = love.span_label(span)
+        #: 榜单要的是「窗口内每个人的全部发言」，所以同样先把这段群历史补全。
+        await self._cover_window(event, platform, group_id, start)
         stats, rows = await self._love_day_stats(
             platform,
             group_id,
@@ -1667,16 +1781,6 @@ class PersonaPrismStar(Star):
             end=end,
             days=span,
         )
-        #: 老群库里可能已经攒够 max_messages，回溯不会出网，先补拉最新一页再说。
-        if not rows and await self._topup_latest(event, platform, group_id):
-            stats, rows = await self._love_day_stats(
-                platform,
-                group_id,
-                day=day,
-                start=start,
-                end=end,
-                days=span,
-            )
         if not rows:
             yield event.plain_result(f"本群{window}还没有攒到语料，先聊起来再说。")
             return

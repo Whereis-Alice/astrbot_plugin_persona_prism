@@ -19,6 +19,7 @@ from typing import Any
 
 from .models import CorpusBundle, MemberProfile, Portrait
 from .prompts import PromptSpec, build_system_prompt, build_user_prompt
+from .titles import fallback_title, normalize_title
 
 #: 需要把「和谁互动过」喂给模型的玩法。姻缘/综合画像/红娘都要看社交痕迹。
 _PARTNER_KEYS = frozenset({"match", "portrait", "legacy_match", "legacy_portrait", "love"})
@@ -115,8 +116,14 @@ def build_portrait(
     bundle: CorpusBundle,
     min_messages: int,
     raw_text: str = "",
+    seed: str = "",
+    title_fallback: bool = True,
 ) -> Portrait:
-    """把解析出来的 dict 收敛成 Portrait，并做本地校正。"""
+    """把解析出来的 dict 收敛成 Portrait，并做本地校正。
+
+    title_fallback=False 表示"模型没给头衔就留空"。恋爱诊断走这一路：
+    它的头衔由四维实分推导（prism.titles.love_title），不该被玩法称号池顶掉。
+    """
     payload = dict(payload)
     payload["kind"] = kind
     payload["structured"] = True
@@ -126,6 +133,17 @@ def build_portrait(
     # 维度分数越界的情况相当常见，直接夹紧。
     for dim in portrait.dimensions:
         dim.score = max(0, min(100, int(dim.score)))
+
+    # 专属头衔：模型给的先洗一遍（剥前缀、限长、判跑偏），洗不出来就按玩法兜一枚。
+    portrait.title = normalize_title(portrait.title)
+    if not portrait.title and title_fallback:
+        portrait.title = fallback_title(
+            kind,
+            seed=seed,
+            tags=portrait.tags,
+            dimensions=portrait.dimensions,
+            headline=portrait.headline,
+        )
 
     portrait.confidence = clamp_confidence(portrait.confidence) or 0.6
     penalty = sample_penalty(bundle.stats.sampled, min_messages)
@@ -139,11 +157,23 @@ def build_portrait(
     return portrait
 
 
-def plain_portrait(text: str, *, kind: str, confidence: float = 0.35) -> Portrait:
-    """结构化解析彻底失败时的兜底画像。"""
+def plain_portrait(
+    text: str,
+    *,
+    kind: str,
+    confidence: float = 0.35,
+    seed: str = "",
+    title_fallback: bool = True,
+) -> Portrait:
+    """结构化解析彻底失败时的兜底画像。
+
+    纯文本玩法（画像系列的自由排版）也照样配一枚头衔 —— 这条路没有 JSON，
+    只能按玩法 + 种子兜一个，起码卡片抬头不空。
+    """
     return Portrait(
         kind=kind,
         headline="",
+        title=fallback_title(kind, seed=seed) if title_fallback else "",
         confidence=confidence,
         raw_text=text.strip(),
         structured=False,
@@ -205,6 +235,8 @@ class PrismAnalyzer:
         profile: MemberProfile | None = None,
         umo: str = "",
         extra_facts: str = "",
+        seed: str = "",
+        title_fallback: bool = True,
     ) -> tuple[Portrait, str]:
         """执行一次分析，返回 (画像, 模型名)。"""
         provider = self.resolve_provider(umo)
@@ -248,7 +280,16 @@ class PrismAnalyzer:
                     last_error = AnalyzeError("模型返回了空内容。")
                     continue
                 if not spec.structured:
-                    return plain_portrait(last_text, kind=spec.key, confidence=0.6), model
+                    return (
+                        plain_portrait(
+                            last_text,
+                            kind=spec.key,
+                            confidence=0.6,
+                            seed=seed,
+                            title_fallback=title_fallback,
+                        ),
+                        model,
+                    )
                 payload = parse_portrait_payload(last_text)
                 if payload:
                     portrait = build_portrait(
@@ -257,6 +298,8 @@ class PrismAnalyzer:
                         bundle=bundle,
                         min_messages=min_messages,
                         raw_text=last_text,
+                        seed=seed,
+                        title_fallback=title_fallback,
                     )
                     if portrait.headline or portrait.sections:
                         return portrait, model
@@ -270,7 +313,7 @@ class PrismAnalyzer:
 
         if last_text.strip():
             # 内容是有的，只是格式不对。宁可少一张雷达图，也别让用户白等。
-            return plain_portrait(last_text, kind=spec.key), model
+            return plain_portrait(last_text, kind=spec.key, seed=seed, title_fallback=title_fallback), model
         raise AnalyzeError(str(last_error) if last_error else "分析失败，未知原因。")
 
     async def _call(

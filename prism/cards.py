@@ -52,6 +52,20 @@ EVIDENCE_STYLE: dict[str, dict[str, str]] = {
     "sakura": {"title": "心动物证 · EVIDENCE", "mark": "EVIDENCE", "badge": "心动", "fallback": "心动瞬间"},
 }
 
+#: 每套主题的「专属头衔」徽章装饰（前缀符号 / 小字标签）。
+#: 头衔本身由 LLM 或 prism.titles 生成，这里只决定它戴什么样的框。
+TITLE_BADGE_STYLE: dict[str, dict[str, str]] = {
+    "aurora": {"glyph": "✦", "cap": "称号"},
+    "ink": {"glyph": "印", "cap": "封号"},
+    "neon": {"glyph": "▰", "cap": "TITLE"},
+    "paper": {"glyph": "❖", "cap": "本期标题"},
+    "dossier": {"glyph": "✚", "cap": "代号"},
+    "sakura": {"glyph": "♛", "cap": "专属头衔"},
+}
+
+#: 头衔里的尾部括注，例如「纯爱战神（反讽）」的「反讽」。
+_TITLE_NOTE_RE = re.compile(r"^(.*?)[（(]([^（）()]{1,8})[）)]\s*$")
+
 _JINJA_TOKEN_RE = re.compile(r"\{(?=[{%#])")
 
 _POLARITY_CLASS = {
@@ -366,6 +380,8 @@ class CardContext:
     #: 自定义字体的 @font-face src。可以是 http(s) URL，也可以是 data URI。
     font_src: str = ""
     font_name: str = ""
+    #: 专属头衔：显示在名字下方的一枚称号徽章。留空则不渲染。
+    title_badge: str = ""
 
 
 @dataclass(slots=True)
@@ -543,6 +559,28 @@ body {
   color: var(--ink-strong);
   word-break: break-all;
 }
+.title-badge {
+  display: inline-flex; align-items: baseline; gap: 7px;
+  margin-top: 11px; max-width: 100%;
+  padding: 5px 15px 6px 12px;
+  border-radius: 999px;
+  background: var(--badge-bg);
+  border: var(--badge-border);
+  color: var(--badge-ink);
+}
+.title-badge .tb-glyph { font-size: 13px; opacity: .85; }
+.title-badge .tb-cap {
+  font-size: 10px; letter-spacing: .22em; opacity: .62;
+  align-self: center;
+}
+.title-badge .tb-name {
+  font-family: var(--font-title);
+  font-size: 17px; font-weight: 700; line-height: 1.25;
+  word-break: break-all;
+}
+.title-badge .tb-note { font-size: 12px; opacity: .7; }
+.title-badge .tb-note::before { content: "（"; }
+.title-badge .tb-note::after { content: "）"; }
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .chip {
   font-size: 12px; padding: 4px 11px; border-radius: 999px;
@@ -781,6 +819,8 @@ _THEME_CSS: dict[str, str] = {
 }
 .who h1 { text-shadow: 0 0 18px rgba(0,255,214,.45); }
 .kicker { text-shadow: 0 0 12px rgba(0,255,214,.6); }
+.title-badge { border-radius: 4px; text-shadow: 0 0 14px rgba(255,46,154,.5); }
+.title-badge .tb-name { letter-spacing: .06em; }
 """,
     "paper": """
 :root {
@@ -873,6 +913,8 @@ _THEME_CSS: dict[str, str] = {
 .kicker { letter-spacing: .34em; }
 .badge { transform: rotate(6deg); font-weight: 700; }
 .sec h3::before { content: "// "; color: var(--accent); }
+.title-badge { border-radius: 2px; transform: rotate(-1.2deg); }
+.title-badge .tb-cap { letter-spacing: .3em; }
 """,
     "sakura": """
 :root {
@@ -920,6 +962,7 @@ _THEME_CSS: dict[str, str] = {
 .kicker { letter-spacing: .26em; }
 .badge { font-weight: 700; }
 .sec h3::before { content: "♡ "; color: var(--accent); }
+.title-badge { box-shadow: 0 6px 18px rgba(255,95,162,.24); }
 .tag { font-weight: 600; }
 """,
 }
@@ -1179,7 +1222,28 @@ def _chip_texts(ctx: CardContext) -> list[str]:
     return chips
 
 
-def _hero_html(ctx: CardContext) -> str:
+def _title_badge_html(ctx: CardContext, badge: str) -> str:
+    """把一枚头衔渲染成名字下方的徽章。空串返回空串。"""
+    text = (badge or "").strip()
+    if not text:
+        return ""
+    style = TITLE_BADGE_STYLE.get(normalize_theme(ctx.theme), TITLE_BADGE_STYLE[DEFAULT_THEME])
+    note = ""
+    matched = _TITLE_NOTE_RE.match(text)
+    if matched and matched.group(1).strip():
+        text = matched.group(1).strip()
+        note = matched.group(2).strip()
+    inner = (
+        f'<span class="tb-glyph">{_esc(style["glyph"])}</span>'
+        f'<span class="tb-cap">{_esc(style["cap"])}</span>'
+        f'<span class="tb-name">{_esc(text)}</span>'
+    )
+    if note:
+        inner += f'<span class="tb-note">{_esc(note)}</span>'
+    return f'<span class="title-badge">{inner}</span>'
+
+
+def _hero_html(ctx: CardContext, badge: str = "") -> str:
     parts: list[str] = ['<div class="hero">']
     if ctx.show_avatar:
         avatar = f'<span class="ini">{_initial(ctx.target_name, ctx.target_id)}</span>'
@@ -1191,6 +1255,7 @@ def _hero_html(ctx: CardContext) -> str:
         '<div class="who">'
         f'<div class="kicker">{_esc(ctx.kind_label)}</div>'
         f"<h1>{_esc(ctx.target_name or ctx.target_id or '匿名群友')}</h1>"
+        f"{_title_badge_html(ctx, badge)}"
         f'<div class="chips">{chips}</div>'
         "</div>",
     )
@@ -1581,7 +1646,7 @@ def build_card_html(portrait: Portrait, ctx: CardContext) -> str:
         body = f'<div class="panel"><div class="raw">{_esc(text)}</div></div>'
 
     inner = (
-        f"{_hero_html(ctx)}{body}"
+        f"{_hero_html(ctx, portrait.title or ctx.title_badge)}{body}"
         f"{_foot_html(portrait, ctx)}{_notes_html(portrait, ctx)}"
     )
     return _document(ctx, css, inner, badge=theme_label(theme))
@@ -1817,7 +1882,7 @@ def build_markdown_card_html(
         for pos, item in enumerate(lines)
     )
     inner = (
-        f"{_hero_html(ctx)}"
+        f"{_hero_html(ctx, ctx.title_badge)}"
         f'<div class="md-body">{body}</div>'
         f'<div class="foot foot-md"><div class="sign">{sign}</div></div>'
     )

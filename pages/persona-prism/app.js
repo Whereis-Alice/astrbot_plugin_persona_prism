@@ -757,6 +757,22 @@ function renderTree() {
   return box;
 }
 
+//: 专属头衔徽章。头衔形如「纯爱战神（反讽）」，括注单独降一号字。
+function titleBadge(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  const matched = text.match(/^(.*?)[（(]([^（）()]{1,8})[）)]\s*$/);
+  const name = matched && matched[1].trim() ? matched[1].trim() : text;
+  const note = matched && matched[1].trim() ? matched[2].trim() : "";
+  const box = make("span", "titlebadge");
+  append(box, [
+    make("span", "titlebadge__glyph", "✦"),
+    make("span", "titlebadge__name", name),
+    note ? make("span", "titlebadge__note", "（" + note + "）") : null,
+  ]);
+  return box;
+}
+
 function recordCard(item) {
   const btn = make("button", "record");
   btn.type = "button";
@@ -774,6 +790,13 @@ function recordCard(item) {
   ]);
   append(top, [who, meta]);
   btn.appendChild(top);
+
+  const badge = titleBadge(item.title);
+  if (badge) {
+    const row = make("div", "record__title");
+    row.appendChild(badge);
+    btn.appendChild(row);
+  }
 
   if (item.headline) {
     btn.appendChild(make("p", "record__headline", item.headline));
@@ -1199,6 +1222,7 @@ function renderDrawer() {
   append(text, [
     make("p", "kicker", record.kind_label + " · " + (record.theme_label || record.theme)),
     make("h2", "", record.user_name),
+    titleBadge(payload.title || record.title),
     make("p", "field__hint", record.group_name + " · #" + record.user_id + " · " + fmtTime(record.created_at)),
   ]);
   const close = button("", { variant: "ghost", icon: "i-close", title: "关闭" });
