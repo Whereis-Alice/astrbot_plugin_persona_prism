@@ -1,8 +1,8 @@
-"""prism.history：四种翻页方式与「棱镜诊断」探针。
+"""prism.history：六种翻页方式与「棱镜诊断」探针。
 
 这个模块是纯函数 + 一个只依赖注入式 fetch 的协程，可以完全脱离 AstrBot 单测。
 用户现场那个"我们只捞到 6 条、上游捞到 91 条"的问题就出在翻页方式选错，所以这里
-把四种组合、别名兼容、以及探针的每个分支都盯死。
+把六种组合、别名兼容、以及探针的每个分支都盯死。
 """
 
 from __future__ import annotations
@@ -31,7 +31,14 @@ def _asc_page(base: int, count: int = 3) -> list[dict[str, Any]]:
 
 
 def test_strategies_cover_both_degrees_of_freedom():
-    assert history.STRATEGIES == ("seq_first", "id_first", "seq_last", "id_last")
+    assert history.STRATEGIES == (
+        "seq_first",
+        "id_first",
+        "seq_last",
+        "id_last",
+        "seq_oldest",
+        "id_oldest",
+    )
     #: 每一种都要有给用户看的中文标签，否则诊断里会漏字。
     assert set(history.STRATEGY_LABELS) == set(history.STRATEGIES)
 
@@ -97,6 +104,20 @@ def test_anchor_of_picks_the_right_end():
     assert history.anchor_of([], "seq_first") is None
 
 
+def test_anchor_of_oldest_uses_timestamps_not_position():
+    #: \u6709\u7684\u534f\u8bae\u7aef\u8fd4\u56de\u7684\u4e00\u9875\u538b\u6839\u6ca1\u6392\u5e8f\uff0c\u9996\u5c3e\u90fd\u4e0d\u662f\u6700\u65e7\u7684\u90a3\u6761\u3002
+    page = [
+        {"message_seq": 20, "message_id": 900_020, "time": 300},
+        {"message_seq": 11, "message_id": 900_011, "time": 100},
+        {"message_seq": 15, "message_id": 900_015, "time": 200},
+    ]
+    assert history.anchor_of(page, "seq_oldest") is page[1]
+    assert history.cursor_of(page, "seq_oldest") == 11
+    assert history.cursor_of(page, "id_oldest") == 900_011
+    #: \u6ca1\u6709\u4efb\u4f55\u65f6\u95f4\u6233\u65f6\u9000\u56de\u7b2c\u4e00\u6761\uff0c\u4e0d\u80fd\u76f4\u63a5\u62a5\u9519\u3002
+    assert history.anchor_of([{"message_seq": 3}], "seq_oldest") == {"message_seq": 3}
+
+
 def test_page_ids_prefers_message_id_then_falls_back():
     page = [{"message_id": "a"}, {"message_seq": 2}, {"real_seq": 3}, {"foo": 1}, "脏数据"]
     assert history.page_ids(page) == {"a", "2", "3"}
@@ -110,8 +131,16 @@ def test_page_time_range_ignores_missing_timestamps():
 
 
 def test_rotate_strategies_skips_current_and_tried():
-    assert history.rotate_strategies("seq_first", set()) == ["id_first", "seq_last", "id_last"]
-    assert history.rotate_strategies("id_first", {"seq_first", "seq_last"}) == ["id_last"]
+    assert history.rotate_strategies("seq_first", set()) == [
+        "id_first",
+        "seq_last",
+        "id_last",
+        "seq_oldest",
+        "id_oldest",
+    ]
+    assert history.rotate_strategies("id_first", {"seq_first", "seq_last", "seq_oldest", "id_oldest"}) == [
+        "id_last",
+    ]
     assert history.rotate_strategies("id_last", set(history.STRATEGIES)) == []
 
 
@@ -152,7 +181,7 @@ def test_probe_identifies_the_working_strategy():
     assert "message_seq" in report.base_keys
     advanced = [item.strategy for item in report.attempts if item.advanced]
     assert advanced == ["id_last"]
-    #: 四种都要有交代（试过、跳过或报错），不能悄悄少一行。
+    #: 六种都要有交代（试过、跳过或报错），不能悄悄少一行。
     assert len(report.attempts) == len(history.STRATEGIES)
 
 
@@ -165,7 +194,7 @@ def test_probe_reports_no_winner_when_protocol_never_pages():
     assert report.winner == ""
     assert all(item.fresh == 0 for item in report.attempts if not item.skipped)
     text = "\n".join(history.render_probe(report, page_size=20))
-    assert "四种方式都翻不动" in text
+    assert "六种方式都翻不动" in text
 
 
 def test_probe_skips_strategies_without_the_field():
@@ -237,8 +266,8 @@ def test_probe_does_not_repeat_identical_cursors():
     report = asyncio.run(history.probe_pagination(same_numbering))
     assert report.winner == "seq_first"
     skipped = [item for item in report.attempts if "相同" in item.skipped]
-    #: id_first 与 seq_first 同值、id_last 与 seq_last 同值 → 各省一次请求。
-    assert len(skipped) == 2
+    #: seq/id 三对错位取值全部撞车（first/last/oldest）→ 共省四次请求。
+    assert len(skipped) == 4
     assert len(calls) == 3
 
 

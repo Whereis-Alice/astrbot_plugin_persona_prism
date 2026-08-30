@@ -898,17 +898,32 @@ class PrismStore:
         rows = self._query(sql, params)
         return PortraitRecord.from_row(rows[0]) if rows else None
 
-    def recent_themes(self, platform: str, group_id: str, limit: int = 2) -> list[str]:
-        """本群最近几张卡用过的主题，最近的在前。自动挡靠它避免连着撞主题。"""
-        rows = self._query(
-            """
-            SELECT theme FROM portraits
-            WHERE platform = ? AND group_id = ? AND theme != ''
-            ORDER BY created_at DESC, id DESC LIMIT ?
-            """,
-            (platform, group_id, max(1, limit)),
-        )
+    def recent_themes(
+        self,
+        platform: str,
+        group_id: str,
+        limit: int = 2,
+        kind: str = "",
+        exclude_kind: str = "",
+    ) -> list[str]:
+        """本群最近几张卡用过的主题，最近的在前。自动挡靠它避免连着撞主题。
+
+        kind / exclude_kind 可以把范围收窄到同一类卡（比如恋爱卡只看恋爱卡），
+        因为恋爱卡和画像卡的主题池子不一样，混到一起算避重复没意义。
+        """
+        sql = "SELECT theme FROM portraits WHERE platform = ? AND group_id = ? AND theme != ''"
+        params: list[Any] = [platform, group_id]
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if exclude_kind:
+            sql += " AND kind != ?"
+            params.append(exclude_kind)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(max(1, limit))
+        rows = self._query(sql, params)
         return [str(row["theme"]) for row in rows]
+
     def user_history(
         self,
         platform: str,

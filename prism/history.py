@@ -7,8 +7,8 @@ OneBot 的 get_group_msg_history 是本插件回溯群历史的唯一入口，�
 * 返回的那一页数组，有的实现是「最旧 → 最新」，有的是「最新 → 最旧」，于是「这一页最旧
   的那条」到底在 messages[0] 还是 messages[-1] 也不固定。
 
-两个自由度组合出四种翻页方式。传错时协议端**不会报错**，而是原地返回同一批最新消息，
-表现得就像「群历史已经翻到头了」。所以这里把四种方式枚举出来，由调用方逐个试，
+两个自由度组合出四种翻页方式，再加两种「按时间戳挑出最旧一条」的兜底写法，共六种。传错时协议端**不会报错**，而是原地返回同一批最新消息，
+表现得就像「群历史已经翻到头了」。所以这里把六种方式枚举出来，由调用方逐个试，
 并把实测可用的那种记进 scan_state 复用。
 
 还有第三个自由度：**参数名**。老一批协议端（go-cqhttp / NapCat / Lagrange）读的是
@@ -16,7 +16,7 @@ message_seq，而 SnowLuma 这类只认 message_id、完全无视 message_seq，
 参数也只是静默忽略。所以 build_history_params 默认把同一个游标值同时写进两个参数名，
 让各家各读自己认的那个 —— 这不增加翻页方式的搜索空间，只是让请求体更通用。
 
-`probe_pagination` 是给「棱镜诊断」指令用的自检探针：它把四种方式各打一次，报出每次
+`probe_pagination` 是给「棱镜诊断」指令用的自检探针：它把六种方式各打一次，报出每次
 返回了多少条、与首页重叠多少、时间有没有真的往前走，让人一眼看出协议端认哪一种。
 """
 
@@ -51,8 +51,17 @@ __all__ = [
     "to_int",
 ]
 
-#: 四种翻页方式，按"先试哪个"排序。名字含义 = 取哪个字段 + 取这一页的哪一端。
-STRATEGIES: tuple[str, ...] = ("seq_first", "id_first", "seq_last", "id_last")
+#: 六种翻页方式，按"先试哪个"排序。名字含义 = 取哪个字段 + 取这一页的哪一端。
+STRATEGIES: tuple[str, ...] = (
+    "seq_first",
+    "id_first",
+    "seq_last",
+    "id_last",
+    #: 少数协议端返回的那一页压根没排序，首尾都不是最旧的一条。这两种直接按时间戳
+    #: 挑最旧的那条当锚点，所以放在最后兜底：页面本来有序时它等价于上面某一种。
+    "seq_oldest",
+    "id_oldest",
+)
 
 #: v1.1.3 只有两种方式，配置和数据库里可能存着旧名字。
 STRATEGY_ALIASES: dict[str, str] = {
@@ -66,6 +75,8 @@ _SPECS: dict[str, tuple[str, str]] = {
     "id_first": ("first", "message_id"),
     "seq_last": ("last", "message_seq"),
     "id_last": ("last", "message_id"),
+    "seq_oldest": ("oldest", "message_seq"),
+    "id_oldest": ("oldest", "message_id"),
 }
 
 STRATEGY_LABELS: dict[str, str] = {
@@ -73,6 +84,8 @@ STRATEGY_LABELS: dict[str, str] = {
     "id_first": "message_id（取本页第一条）",
     "seq_last": "message_seq（取本页最后一条）",
     "id_last": "message_id（取本页最后一条）",
+    "seq_oldest": "message_seq（取本页时间最早的一条）",
+    "id_oldest": "message_id（取本页时间最早的一条）",
 }
 
 #: 读游标时的字段回退顺序。real_seq 是部分实现给 message_seq 起的别名。
@@ -82,7 +95,7 @@ _FIELD_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 
-#: 请求体写法。游标的**值**由上面四种方式决定，这里只决定它写进哪个参数名。
+#: 请求体写法。游标的**值**由上面六种方式决定，这里只决定它写进哪个参数名。
 #:
 #: * dual —— 同时写 message_seq 和 message_id（也同时给 reverseOrder / reverse_order
 #:   两种拼写）。各家协议端的参数校验都是「忽略不认识的键」，所以这样最通用，是默认值。
@@ -217,6 +230,12 @@ def anchor_of(messages: Any, strategy: str) -> dict[str, Any] | None:
     if not rows:
         return None
     end, _ = _SPECS.get(normalize_strategy(strategy) or "seq_first", ("first", "message_seq"))
+    if end == "oldest":
+        stamped = [(to_int(raw.get("time")) or 0, index) for index, raw in enumerate(rows)]
+        stamped = [item for item in stamped if item[0] > 0]
+        if stamped:
+            return rows[min(stamped)[1]]
+        return rows[0]
     return rows[0] if end == "first" else rows[-1]
 
 
@@ -307,7 +326,7 @@ class ProbeReport:
     last_seq: int | None = None
     last_id: int | None = None
     attempts: list[ProbeAttempt] = field(default_factory=list)
-    #: 实测可用的策略，空串表示四种都不行。
+    #: 实测可用的策略，空串表示六种都不行。
     winner: str = ""
     #: 清洗漏斗：解析出多少条、按当前配置留下多少、按最宽松口径留下多少。
     parsed: int = 0
@@ -321,7 +340,7 @@ async def probe_pagination(
     strategies: tuple[str, ...] = STRATEGIES,
     brief: Callable[[BaseException], str] | None = None,
 ) -> ProbeReport:
-    """逐个实测四种翻页方式，返回可读的诊断结果。
+    """逐个实测六种翻页方式，返回可读的诊断结果。
 
     fetch(cursor) 负责真正调 get_group_msg_history 并返回 messages 列表；
     异常由本函数捕获并记进结果，不向外抛。
@@ -422,7 +441,7 @@ def render_probe(report: ProbeReport, *, page_size: int) -> list[str]:
         keys = "、".join(report.base_keys[:12])
         lines.append(f"  返回字段：{keys}")
     lines.append("")
-    lines.append("往前翻一页的四种方式：")
+    lines.append("往前翻一页的六种方式：")
     for attempt in report.attempts:
         label = strategy_label(attempt.strategy)
         if attempt.skipped:
@@ -456,7 +475,7 @@ def render_probe(report: ProbeReport, *, page_size: int) -> list[str]:
             lines.append("本协议端只认 message_id 当锚点（SnowLuma 就属于这一类）。")
         lines.append("现在发一次画像指令，再发「棱镜缓存」，「已往前翻过 N 页」应该会涨起来。")
     else:
-        lines.append("结论：四种方式都翻不动，当前协议端的 get_group_msg_history 没有实现分页，")
+        lines.append("结论：六种方式都翻不动，当前协议端的 get_group_msg_history 没有实现分页，")
         lines.append("或者它不认我们传的锚点参数名（已自动同时试过 message_seq 与 message_id 两种写法）。")
         lines.append("只能靠被动采集慢慢攒语料；换 NapCat / Lagrange / SnowLuma 之类的协议端可解决。")
 

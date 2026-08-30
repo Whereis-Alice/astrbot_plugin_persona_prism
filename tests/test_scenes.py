@@ -62,14 +62,16 @@ class TestRowsToUtterances:
             ("U1001", "在的", True),
         ]
 
-    def test_media_only_rows_render_placeholder(self):
+    def test_media_only_rows_are_dropped(self):
+        # 卡片上一串「[图片]」看不懂又像 bug，纯媒体消息不进气泡。
         rows = [
             _row("1", ME, "", 100, images=1),
-            _row("2", ME, "", 101, images=3),
+            _row("2", ME, "[图片×3]", 101, images=3),
             _row("3", ME, "", 102),
+            _row("4", ME, "[图片]这张太顶了", 103, images=1),
         ]
         lines = scenes.rows_to_utterances(rows, ME)
-        assert [u.text for u in lines] == ["[图片]", "[图片×3]"]
+        assert [u.text for u in lines] == ["这张太顶了"]
 
     def test_falls_back_to_user_id_then_placeholder(self):
         rows = [_row("1", "2002", "哦", 100, user_name=""), _row("2", "", "?", 101, user_name="")]
@@ -180,6 +182,70 @@ class TestEnrichAll:
 
     def test_empty_list_returns_zero(self):
         assert scenes.enrich_all([], [], [], user_id=ME) == 0
+
+
+class TestSceneWindow:
+    def test_takes_the_whole_turn_not_just_the_neighbours(self):
+        #: 一次来回横跨十几条，「前后各一条」只能切出半截话。
+        rows = [_row("1", "2002", "\u6709\u4eba\u5728\u5417", 1000)]
+        rows += [_row(str(i), ME, f"\u8bf4{i}", 1000 + i * 30) for i in range(2, 6)]
+        rows.append(_row("6", "2003", "\u542c\u61c2\u4e86", 1000 + 6 * 30))
+        window = scenes.scene_window(rows, message_id="3", user_id=ME)
+        got = [row["message_id"] for row in window]
+        assert got == ["1", "2", "3", "4", "5", "6"]
+
+    def test_a_new_turn_after_a_long_silence_is_not_pulled_in(self):
+        rows = [
+            _row("1", "2002", "\u524d\u4e00\u8f6e\u7684\u8bdd", 1000),
+            _row("2", ME, "\u524d\u4e00\u8f6e\u56de\u5e94", 1030),
+            #: 中间安静了半小时，下面是另一轮完全不相干的对话。
+            _row("3", "2003", "\u65b0\u8bdd\u9898", 1000 + 3600),
+            _row("4", ME, "\u63a5\u65b0\u8bdd\u9898", 1000 + 3630),
+            _row("5", "2004", "\u55ef\u55ef", 1000 + 3660),
+        ]
+        got = [row["message_id"] for row in scenes.scene_window(rows, message_id="4", user_id=ME)]
+        assert got == ["3", "4", "5"]
+
+    def test_falls_back_outward_when_the_turn_is_a_monologue(self):
+        rows = [
+            _row("1", "2002", "\u6709\u4eba\u5417", 100),
+            #: 自言自语那一轮里没有别人，硬拼出来像在对空气讲话。
+            _row("2", ME, "\u81ea\u8a00\u81ea\u8bed\u4e00", 5000),
+            _row("3", ME, "\u81ea\u8a00\u81ea\u8bed\u4e8c", 5030),
+        ]
+        got = [row["message_id"] for row in scenes.scene_window(rows, message_id="2", user_id=ME)]
+        assert "1" in got
+
+    def test_long_turn_is_clipped_around_the_anchor(self):
+        rows = [_row(str(i), "2002" if i % 3 else ME, f"t{i}", 1000 + i * 10) for i in range(40)]
+        window = scenes.scene_window(rows, message_id="20", user_id=ME, cap=5)
+        got = [row["message_id"] for row in window]
+        assert len(got) == 5
+        assert "20" in got
+
+    def test_empty_or_unlocatable_returns_nothing(self):
+        assert scenes.scene_window([], message_id="1", user_id=ME) == []
+        assert scenes.scene_window([_row("1", ME, "x", 100)], user_id=ME) == []
+
+
+class TestSplitTurns:
+    def test_silence_starts_a_new_turn(self):
+        rows = [_row("1", ME, "a", 100), _row("2", ME, "b", 130), _row("3", ME, "c", 9000)]
+        turns = scenes.split_turns(rows)
+        assert [(t.start, t.end) for t in turns] == [(0, 1), (2, 2)]
+
+    def test_empty_input_has_no_turns(self):
+        assert scenes.split_turns([]) == []
+
+    def test_turn_of_finds_the_owning_turn(self):
+        turns = [scenes.Turn(0, 2), scenes.Turn(3, 5)]
+        assert scenes.turn_of(turns, 4) == scenes.Turn(3, 5)
+        assert scenes.turn_of(turns, 9) is None
+
+    def test_clip_turn_keeps_the_anchor_inside(self):
+        assert scenes.clip_turn(scenes.Turn(0, 20), 18, 5) == [16, 17, 18, 19, 20]
+        assert scenes.clip_turn(scenes.Turn(0, 2), 1, 9) == [0, 1, 2]
+
 
 class TestRealText:
     def test_strips_media_placeholders(self):

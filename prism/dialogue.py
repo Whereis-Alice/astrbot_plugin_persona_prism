@@ -22,11 +22,21 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from .scenes import TURN_GAP_SECONDS, Turn, clip_turn, real_text, split_turns, turn_of
+
+__all__ = [
+    "TURN_GAP_SECONDS",
+    "Turn",
+    "clip_turn",
+    "split_turns",
+    "turn_of",
+]
+
 #: 对话行的说话人标签。故意用中文短标签而不是 [Target]/[Other]：
 #: 中文模型对中文标签的指代把握更稳，也省 token。
 LABEL_TARGET = "[TA]"
 LABEL_OTHER = "[其他人]"
-LABEL_BOT = "[机器人]"
+LABEL_BOT = "[你]"
 
 #: 片段之间的断裂提示。中间跳过的内容不长、或算不出间隔时用这一句。
 GAP_MARK = "……（中间略）……"
@@ -37,9 +47,8 @@ QUOTE_PREFIX = "    ↳ 引用"
 #: 时间间隔超过这个秒数就算两个不同的场景，即使索引相邻。
 SCENE_GAP_SECONDS = 20 * 60
 
-#: 群里安静超过这个秒数，就认为上一轮聊完了 —— 用来把群历史切成一段段「对话回合」。
-#: 按回合取上下文比「前后各 N 条」准得多：一个回合本来就是一次完整的来回。
-TURN_GAP_SECONDS = 8 * 60
+#: 回合切分（Turn / split_turns / turn_of / clip_turn / TURN_GAP_SECONDS）统一放在 scenes，
+#: 提示词里的「对话现场」和卡片上的气泡才会切在同一处；这里只是转出来方便调用。
 
 #: 一个回合最多展开多少行。回合本身比这短就整段拿走，超了就以锚点为中心裁。
 TURN_LINE_CAP = 9
@@ -63,14 +72,13 @@ def _split_ids(raw: Any) -> list[str]:
 
 
 def _text_of(row: dict[str, Any]) -> str:
-    """取一行的可读正文；纯图消息也要占位，否则对话会莫名断裂。"""
-    text = str(row.get("text") or "").strip()
-    if text:
-        return text
-    images = int(row.get("images") or 0)
-    if images > 1:
-        return f"[图片×{images}]"
-    return "[图片]" if images == 1 else ""
+    """取一行的可读正文。图片、表情、语音这类占位符一律剔掉。
+
+    模型看不见图，「[图片]」只是一个无信息的词，铺在现场里既占篇幅又会诱导它
+    编造"TA 发了一张搞笑图"这种结论。剔干净后整行没字了就返回空串，让上层跳过
+    这一行（跳过留下的空档会由「隔了 N 分钟」那套断裂提示照常补上）。
+    """
+    return real_text(row.get("text") or "")
 
 
 def _name_of(row: dict[str, Any], names: dict[str, str]) -> str:
@@ -190,9 +198,13 @@ def social_signals(
     names: dict[str, str] | None = None,
     self_id: str = "",
 ) -> SocialSignals:
-    """统计 TA 与别人的互动结构。只看 reply_to / at_ids，不猜。"""
+    """统计 TA 与别人的互动结构。只看 reply_to / at_ids，不猜。
+
+    机器人自己也算群里的一员：TA 找机器人搭话、机器人接住 TA 的话，都是真实互动，
+    没有理由从统计里抠掉（self_id 保留只为兼容旧调用）。
+    """
+    _ = self_id
     target = str(target_id or "")
-    bot = str(self_id or "")
     ordered = order_rows(rows)
     nick = name_index(ordered, names)
     owner: dict[str, str] = {}
@@ -205,8 +217,6 @@ def social_signals(
     addressed: dict[str, int] = {}
     for row in ordered:
         uid = str(row.get("user_id") or "")
-        if bot and uid == bot:
-            continue
         sig.total += 1
         reply_to = str(row.get("reply_to") or "")
         ats = _split_ids(row.get("at_ids"))
@@ -219,7 +229,7 @@ def social_signals(
                     addressed.get(nick.get(parent, "") or parent, 0) + 1
                 )
             for at_id in ats:
-                if at_id and at_id != target and at_id != bot:
+                if at_id and at_id != target:
                     sig.at_others += 1
                     addressed[nick.get(at_id, "") or at_id] = (
                         addressed.get(nick.get(at_id, "") or at_id, 0) + 1
@@ -236,7 +246,7 @@ def social_signals(
     sig.addressed = sorted(addressed.items(), key=lambda kv: (-kv[1], kv[0]))
     # 时间口径的「有人接话吗」：只在 TA 一段连续发言的最后一句结算，
     # 免得刷屏 5 条被算成 5 次；窗口最末一句不判定，那是取样边界不是冷场。
-    people = [r for r in ordered if not (bot and str(r.get("user_id") or "") == bot)]
+    people = list(ordered)
     for index, row in enumerate(people):
         if str(row.get("user_id") or "") != target or not target:
             continue
@@ -322,52 +332,6 @@ def collect_windows(
     return picked
 
 
-@dataclass(slots=True)
-class Turn:
-    """一段「对话回合」：中间没有长时间静默的连续消息，start/end 均含。"""
-
-    start: int
-    end: int
-
-    @property
-    def size(self) -> int:
-        return self.end - self.start + 1
-
-
-def split_turns(
-    ordered: Sequence[dict[str, Any]],
-    *,
-    gap: int = TURN_GAP_SECONDS,
-) -> list[Turn]:
-    """按静默时长把群历史切成一段段对话回合。
-
-    群聊的一次来回往往横跨十几条、几分钟，中间还夹着别人插话；按「前后各 N 条」
-    切会把一次完整的对话切断，也会把两个不相干的话题粘在一起。按静默切更贴近
-    真实的聊天节奏：安静下来了，这一轮就算聊完了。
-    """
-    turns: list[Turn] = []
-    if not ordered:
-        return turns
-    start = 0
-    prev_ts = int(ordered[0].get("ts") or 0)
-    for index in range(1, len(ordered)):
-        ts = int(ordered[index].get("ts") or 0)
-        if prev_ts and ts and ts - prev_ts > max(0, int(gap)):
-            turns.append(Turn(start, index - 1))
-            start = index
-        prev_ts = ts or prev_ts
-    turns.append(Turn(start, len(ordered) - 1))
-    return turns
-
-
-def turn_of(turns: Sequence[Turn], index: int) -> Turn | None:
-    """找出某一行属于哪个回合。"""
-    for turn in turns:
-        if turn.start <= index <= turn.end:
-            return turn
-    return None
-
-
 def message_owners(ordered: Sequence[dict[str, Any]]) -> dict[str, str]:
     """message_id → 发送者 uid，用来把 reply_to 还原成「回的是谁」。"""
     owner: dict[str, str] = {}
@@ -394,6 +358,10 @@ def grade_anchors(
     owner = message_owners(ordered)
     tiers: dict[int, int] = {}
     for index, row in enumerate(ordered):
+        if not _text_of(row):
+            #: 纯图 / 纯表情不能当锚点：它渲染不出内容，围着它铺一段现场等于
+            #: 白花预算，还会让模型对着一行空气找上下文。
+            continue
         uid = str(row.get("user_id") or "")
         reply_to = str(row.get("reply_to") or "")
         parent = owner.get(reply_to, "")
@@ -416,18 +384,6 @@ def grade_anchors(
                 break
     return tiers
 
-
-def clip_turn(turn: Turn, anchor: int, cap: int) -> list[int]:
-    """回合太长时，以锚点为中心裁出一段，尽量把上下文对称留在两边。"""
-    if cap <= 0 or turn.size <= cap:
-        return list(range(turn.start, turn.end + 1))
-    half = cap // 2
-    low = max(turn.start, anchor - half)
-    high = low + cap - 1
-    if high > turn.end:
-        high = turn.end
-        low = high - cap + 1
-    return list(range(low, high + 1))
 
 
 def select_lines(
@@ -547,10 +503,10 @@ def render_lines(
                 clipped = quoted if len(quoted) <= 40 else quoted[:40] + "…"
                 out.append(f"{QUOTE_PREFIX} {quoted_who}：{clipped}")
         uid = str(row.get("user_id") or "")
-        if bot and uid == bot:
-            label = LABEL_BOT
-        elif uid and uid == target:
+        if uid and uid == target:
             label = LABEL_TARGET
+        elif bot and uid == bot:
+            label = LABEL_BOT
         else:
             label = LABEL_OTHER
         who = _name_of(row, nick)

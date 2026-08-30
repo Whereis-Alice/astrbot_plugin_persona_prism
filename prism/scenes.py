@@ -19,6 +19,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
@@ -51,6 +52,70 @@ OWN_TEXT_FLOOR = 2
 SCENE_TEXT_FLOOR = 4
 
 
+#: 静默多久算「这一轮聊完了」。和提示词里那份「对话现场」用同一个口径，
+#: 卡片上看到的气泡才和模型读到的上下文是同一段对话。
+TURN_GAP_SECONDS = 8 * 60
+
+
+@dataclass(slots=True, frozen=True)
+class Turn:
+    """一段「对话回合」：中间没有长时间静默的连续消息，start/end 均含。"""
+
+    start: int
+    end: int
+
+    @property
+    def size(self) -> int:
+        return self.end - self.start + 1
+
+
+def split_turns(
+    ordered: Sequence[dict[str, Any]],
+    *,
+    gap: int = TURN_GAP_SECONDS,
+) -> list[Turn]:
+    """按静默时长把群历史切成一段段对话回合。
+
+    群聊的一次来回往往横跨十几条、几分钟，中间还夹着别人插话；按「前后各 N 条」
+    切会把一次完整的对话切断，也会把两个不相干的话题粘在一起。按静默切更贴近
+    真实的聊天节奏：安静下来了，这一轮就算聊完了。
+    """
+    turns: list[Turn] = []
+    if not ordered:
+        return turns
+    start = 0
+    prev_ts = int(ordered[0].get("ts") or 0)
+    for index in range(1, len(ordered)):
+        ts = int(ordered[index].get("ts") or 0)
+        if prev_ts and ts and ts - prev_ts > max(0, int(gap)):
+            turns.append(Turn(start, index - 1))
+            start = index
+        prev_ts = ts or prev_ts
+    turns.append(Turn(start, len(ordered) - 1))
+    return turns
+
+
+def turn_of(turns: Sequence[Turn], index: int) -> Turn | None:
+    """找出某一行属于哪个回合。"""
+    for turn in turns:
+        if turn.start <= index <= turn.end:
+            return turn
+    return None
+
+
+def clip_turn(turn: Turn, anchor: int, cap: int) -> list[int]:
+    """回合太长时，以锚点为中心裁出一段，尽量把上下文对称留在两边。"""
+    if cap <= 0 or turn.size <= cap:
+        return list(range(turn.start, turn.end + 1))
+    half = cap // 2
+    low = max(turn.start, anchor - half)
+    high = low + cap - 1
+    if high > turn.end:
+        high = turn.end
+        low = high - cap + 1
+    return list(range(low, high + 1))
+
+
 def _norm(text: str) -> str:
     return "".join(
         ch
@@ -60,7 +125,7 @@ def _norm(text: str) -> str:
 
 
 def _media_text(row: dict[str, Any]) -> str:
-    """纯图消息在气泡里也要占一行，否则对话会莫名断裂。"""
+    """纯图消息的占位文本。只在少数需要"这里确实有条消息"的判断里用得上。"""
     images = int(row.get("images") or 0)
     if images > 1:
         return f"[图片×{images}]"
@@ -119,16 +184,21 @@ def rows_to_utterances(
     user_id: str,
     *,
     names: dict[str, str] | None = None,
+    self_id: str = "",
 ) -> list[Utterance]:
-    """把一段连续语料渲染成气泡序列。"""
+    """把一段连续语料渲染成气泡序列。
+
+    每个气泡都带上说话人的 uid，卡片才能给在场的每一个人取真头像 —— 只有主角
+    有头像、其他人是灰圆牌的现场，看着就不像真的聊天。
+    """
     nick = dict(names or {})
     out: list[Utterance] = []
     for row in rows:
-        text = str(row.get("text") or "").strip()
+        #: 图片、表情、语音一律不进气泡：卡片上一串「[图片]」既看不懂又像 bug，
+        #: 剔掉后整条没字了就跳过这条消息。
+        text = real_text(row.get("text") or "")
         if not text:
-            text = _media_text(row)
-            if not text:
-                continue
+            continue
         uid = str(row.get("user_id") or "")
         name = nick.get(uid, "") or str(row.get("user_name") or "").strip() or uid or "群友"
         ts = int(row.get("ts") or 0)
@@ -139,14 +209,16 @@ def rows_to_utterances(
                 text=text,
                 mine=bool(uid) and uid == user_id,
                 clock=clock,
+                user_id=uid,
+                is_bot=bool(self_id) and uid == str(self_id) and uid != str(user_id),
             ),
         )
     return out
 
 
 def _visible(row: dict[str, Any]) -> bool:
-    """这一行在气泡里会不会真的显示出来。"""
-    return bool(str(row.get("text") or "").strip() or _media_text(row))
+    """这一行在气泡里会不会真的显示出来（纯图 / 纯表情不算）。"""
+    return bool(real_text(row.get("text") or ""))
 
 
 def _others_in(rows: Sequence[dict[str, Any]], user_id: str) -> int:
@@ -157,6 +229,26 @@ def _others_in(rows: Sequence[dict[str, Any]], user_id: str) -> int:
         for row in rows
         if str(row.get("user_id") or "") != target and _visible(row)
     )
+
+
+def _locate_index(
+    ordered: Sequence[dict[str, Any]],
+    *,
+    message_id: str = "",
+    center_ts: int = 0,
+) -> int:
+    """在已排好序的语料里定位锚点那条，找不到返回 -1。"""
+    if message_id:
+        for pos, row in enumerate(ordered):
+            if str(row.get("message_id") or "") == message_id:
+                return pos
+    if center_ts and ordered:
+        # 消息 ID 对不上（协议端改过 ID、或语料被清理过）时退回按时间就近。
+        return min(
+            range(len(ordered)),
+            key=lambda pos: abs(int(ordered[pos].get("ts") or 0) - int(center_ts)),
+        )
+    return -1
 
 
 def slice_around(
@@ -178,18 +270,7 @@ def slice_around(
     if not rows:
         return []
     ordered = sorted(rows, key=lambda r: (int(r.get("ts") or 0), str(r.get("message_id") or "")))
-    index = -1
-    if message_id:
-        for pos, row in enumerate(ordered):
-            if str(row.get("message_id") or "") == message_id:
-                index = pos
-                break
-    if index < 0 and center_ts:
-        # 消息 ID 对不上（协议端改过 ID、或语料被清理过）时退回按时间就近。
-        index = min(
-            range(len(ordered)),
-            key=lambda pos: abs(int(ordered[pos].get("ts") or 0) - int(center_ts)),
-        )
+    index = _locate_index(ordered, message_id=message_id, center_ts=center_ts)
     if index < 0:
         return []
     span = max(0, context)
@@ -207,6 +288,52 @@ def slice_around(
                 break  # 已经把整段语料吃完了，再扩也没有新内容
             picked = wider
     return picked
+
+
+def scene_window(
+    rows: Sequence[dict[str, Any]],
+    *,
+    message_id: str = "",
+    center_ts: int = 0,
+    user_id: str = "",
+    min_others: int = 1,
+    cap: int = SCENE_LIMIT,
+    turn_gap: int = TURN_GAP_SECONDS,
+) -> list[dict[str, Any]]:
+    """取出锚点所在的那一整轮对话，作为卡片上要还原的现场。
+
+    「前后各 N 条」切出来的现场经常是半截话：一次来回在群里往往横跨十几条，
+    中间还夹着别人插话。这里改成先按静默把群历史切成一轮轮对话，取锚点所在的
+    那一轮，太长再以锚点为中心裁 —— 和模型读到的上下文口径一致。
+
+    整轮里仍然只有本人一个人在说（自言自语的那种）时，退回按条数往外扩，
+    至少凑出一句别人的话，不然气泡看着像在对空气讲。
+    """
+    if not rows:
+        return []
+    ordered = sorted(rows, key=lambda r: (int(r.get("ts") or 0), str(r.get("message_id") or "")))
+    index = _locate_index(ordered, message_id=message_id, center_ts=center_ts)
+    if index < 0:
+        return []
+    turns = split_turns(ordered, gap=turn_gap)
+    turn = turn_of(turns, index)
+    picked: list[dict[str, Any]] = []
+    if turn is not None:
+        picked = [ordered[pos] for pos in clip_turn(turn, index, max(1, int(cap)))]
+    if picked and (min_others <= 0 or _others_in(picked, user_id) >= min_others):
+        return picked
+    widened = slice_around(
+        ordered,
+        message_id=message_id,
+        center_ts=center_ts,
+        context=1,
+        user_id=user_id,
+        min_others=min_others,
+    )
+    #: 两条路都没凑出别人的话时，取内容更多的那一段，别把现场缩成一个孤零零的气泡。
+    if _others_in(widened, user_id) > _others_in(picked, user_id):
+        return widened
+    return picked or widened
 
 
 def center_scene(lines: Sequence[Utterance], limit: int = SCENE_LIMIT) -> list[Utterance]:
@@ -238,6 +365,7 @@ def enrich_evidence(
     context: int = 1,
     label: str = "现场片段",
     min_others: int = 1,
+    self_id: str = "",
 ) -> bool:
     """给一条证供补上真实对话。补上了返回 True。
 
@@ -248,15 +376,15 @@ def enrich_evidence(
     hit = locate_quote(item.quote, messages)
     if hit is None:
         return False
-    window = slice_around(
+    window = scene_window(
         rows,
         message_id=str(hit.message_id or ""),
         center_ts=int(hit.ts or 0),
-        context=context,
         user_id=user_id,
         min_others=min_others,
+        cap=max(SCENE_LIMIT, 2 * max(0, context) + 1),
     )
-    dialogue = rows_to_utterances(window, user_id, names=names)
+    dialogue = rows_to_utterances(window, user_id, names=names, self_id=self_id)
     if not any(line.mine for line in dialogue):
         # 没定位到本人那句就别硬拼，交给 Evidence.scene_lines 用 quote 兜底。
         return False
@@ -280,6 +408,7 @@ def enrich_all(
     context: int = 1,
     label: str = "现场片段",
     min_others: int = 1,
+    self_id: str = "",
 ) -> int:
     """批量补全，返回成功补上对话的条数。"""
     filled = 0
@@ -293,6 +422,7 @@ def enrich_all(
             context=context,
             label=label,
             min_others=min_others,
+            self_id=self_id,
         ):
             filled += 1
     return filled

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from astrbot_plugin_persona_prism.prism import dashboard
+from astrbot_plugin_persona_prism.prism import cards, dashboard
 from astrbot_plugin_persona_prism.prism.config import DASHBOARD_WRITABLE, PrismConfig
 from astrbot_plugin_persona_prism.prism.models import CorpusMessage, PortraitRecord
 from astrbot_plugin_persona_prism.prism.prompts import VALID_LAYOUTS, PromptLibrary
@@ -297,8 +297,10 @@ def test_build_settings_marks_enum_fields_as_choice(store, config):
     # 6 套真主题 + 自动挡
     assert len(theme_values) == 7
     assert theme_values[0] == "auto"
+    assert theme_values == ["auto", *cards.PORTRAIT_THEMES]
     assert fields["love.theme"]["type"] == "choice"
-    assert [c["value"] for c in fields["love.theme"]["choices"]] == theme_values
+    # 恋爱卡只在四套恋爱皮肤里挑
+    assert [c["value"] for c in fields["love.theme"]["choices"]] == ["auto", *cards.LOVE_THEMES]
     assert fields["privacy.include_profile_fields"]["type"] == "multi"
 
 

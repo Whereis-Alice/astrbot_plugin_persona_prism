@@ -5,7 +5,7 @@
 同时准备了三层兜底：
 
 1. 正常解析；
-2. JSON 有瑕疵（多了代码围栏、末尾多逗号、前后有寒暄）→ 尽力修复；
+2. JSON 有瑕疵（代码围栏、末尾多逗号、全角标点、被 max_tokens 截断）→ 尽力修补；
 3. 实在解析不出来 → 退化成纯文本画像（structured=False），卡片照样能渲染，
    只是没有雷达图。绝不因为格式问题让用户看到一句 "生成失败"。
 """
@@ -26,11 +26,22 @@ from .titles import fallback_title, normalize_title
 _PARTNER_KEYS = frozenset({"match", "portrait", "legacy_match", "legacy_portrait", "love"})
 
 _TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+#: 截断时常见的"键写了一半、值还没来"，例如 ... , "advice"  → 直接删掉这截。
+_DANGLING_KEY_RE = re.compile(r",\s*\"[^\"]*\"\s*:?\s*$")
+#: 逐段砍尾巴的最大尝试次数，防止超长残片把 CPU 磨光。
+_MAX_TRUNCATE_TRIES = 40
 _SMART_QUOTES = {
     "\u201c": '"',
     "\u201d": '"',
     "\u2018": "'",
     "\u2019": "'",
+}
+#: 只在 JSON 结构位置（字符串之外）纠正的全角符号。
+_STRUCT_FIXES = {
+    "\uff0c": ",",
+    "\uff1a": ":",
+    "\u201c": '"',
+    "\u201d": '"',
 }
 
 
@@ -60,26 +71,142 @@ def extract_json_object(text: str) -> str:
     return body[start : end + 1]
 
 
-def parse_portrait_payload(text: str) -> dict[str, Any] | None:
-    """尽最大努力把模型输出解析成 dict。失败返回 None。"""
-    candidate = extract_json_object(text)
-    if not candidate:
-        return None
-    attempts = [candidate]
-    repaired = _TRAILING_COMMA_RE.sub(r"\1", candidate)
-    if repaired != candidate:
-        attempts.append(repaired)
-    swapped = repaired
-    for bad, good in _SMART_QUOTES.items():
-        swapped = swapped.replace(bad, good)
-    if swapped != repaired:
-        attempts.append(swapped)
-    for attempt in attempts:
+def json_fragment(text: str) -> str:
+    """从 `{` 开始一路取到结尾，不要求右括号闭合。
+
+    模型被 max_tokens 截断时，输出往往停在半句话上。这种残片交给 _repair_json
+    补齐，通常还能救回 headline / 维度 / 前几段正文，比整份退化成纯文本划算得多。
+    """
+    body = strip_code_fence(text)
+    start = body.find("{")
+    if start == -1:
+        return ""
+    return body[start:]
+
+
+def _repair_json(text: str) -> str:
+    """字符串感知的 JSON 修补。
+
+    做三件事：字符串外把全角逗号/冒号/引号换回半角；字符串内把裸换行、制表符
+    转成合法转义；最后补上没闭合的引号与括号，并抹掉尾随逗号。
+
+    刻意不做「全文替换中文标点」那种一刀切修补：证据区要逐字保留群友原话，
+    把正文里的中文逗号改成英文逗号等于篡改证据。
+    """
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                out.append(ch)
+                escaped = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = False
+                out.append(ch)
+                continue
+            if ch in "\n\r":
+                out.append("\\n")
+                continue
+            if ch == "\t":
+                out.append("\\t")
+                continue
+            out.append(ch)
+            continue
+        mapped = _STRUCT_FIXES.get(ch, ch)
+        if mapped == '"':
+            in_string = True
+            out.append(mapped)
+            continue
+        if mapped in "{[":
+            stack.append("}" if mapped == "{" else "]")
+        elif mapped in "}]" and stack and stack[-1] == mapped:
+            stack.pop()
+        out.append(mapped)
+    if escaped:
+        out.pop()  # 结尾悬空的反斜杠，直接丢掉
+    if in_string:
+        out.append('"')
+    body = "".join(out).rstrip()
+    body = _DANGLING_KEY_RE.sub("", body)
+    while body.endswith(","):
+        body = body[:-1].rstrip()
+    while stack:
+        body += stack.pop()
+    return _TRAILING_COMMA_RE.sub(r"\1", body)
+
+
+def _cut_points(text: str) -> list[int]:
+    """字符串外的逗号位置，用来一段段砍掉被截断的尾巴。"""
+    points: list[int] = []
+    in_string = False
+    escaped = False
+    for index, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == ",":
+            points.append(index)
+    return points
+
+
+def _json_attempts(text: str) -> list[tuple[str, str]]:
+    """按"改动从小到大"的顺序列出候选，返回 (策略名, 文本)。"""
+    attempts: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def push(name: str, body: str) -> None:
+        body = body.strip()
+        if not body or body in seen:
+            return
+        seen.add(body)
+        attempts.append((name, body))
+
+    closed = extract_json_object(text)
+    push("strict", closed)
+    if closed:
+        repaired = _TRAILING_COMMA_RE.sub(r"\1", closed)
+        push("trailing_comma", repaired)
+        swapped = repaired
+        for bad, good in _SMART_QUOTES.items():
+            swapped = swapped.replace(bad, good)
+        push("smart_quotes", swapped)
+    #: 模型返回顶层数组时不做残片抢救：我们的契约是一个对象，
+    #: 硬抢救只会把数组里的第一个元素当成画像，属于猜测而不是修补。
+    fragment = "" if strip_code_fence(text).lstrip().startswith("[") else json_fragment(text)
+    if fragment:
+        push("repair", _repair_json(fragment))
+        for index in reversed(_cut_points(fragment)[-_MAX_TRUNCATE_TRIES:]):
+            push("truncate", _repair_json(fragment[:index]))
+    return attempts
+
+
+def parse_portrait_payload(text: str, report: list[str] | None = None) -> dict[str, Any] | None:
+    """尽最大努力把模型输出解析成 dict。失败返回 None。
+
+    传入 report 时，会把最终生效的策略名追加进去，方便上层写日志。
+    """
+    for name, attempt in _json_attempts(text):
         try:
             data = json.loads(attempt)
         except (TypeError, ValueError):
             continue
-        if isinstance(data, dict):
+        if isinstance(data, dict) and data:
+            if report is not None:
+                report.append(name)
             return data
     return None
 
@@ -227,7 +354,11 @@ class PrismAnalyzer:
 
     # -- AstrBot 人格 ------------------------------------------------------
     async def persona_note(self, umo: str = "") -> str:
-        """可选：取当前会话人格，作为文案口吻提示。默认关闭。"""
+        """可选：取当前会话人格，作为文案口吻提示。默认关闭。
+
+        这里刻意留了 info 级日志：口吻生效与否在卡片上很难肉眼分辨，出问题时
+        先看一眼日志就能分清「开关没开」「人格没解析到」和「模型没照做」。
+        """
         if not self._config.bool_of("persona.use_astrbot_persona"):
             return ""
         info = await resolve_persona(
@@ -236,7 +367,15 @@ class PrismAnalyzer:
             persona_id=self._config.str_of("persona.persona_id"),
             logger=self._logger,
         )
-        return info.to_prompt_block()
+        block = info.to_prompt_block()
+        if block and self._logger:
+            self._logger.info(
+                "[人格棱镜] 本次文案套用人格「%s」（来源：%s，设定 %s 字）。",
+                info.name or "未命名",
+                info.origin or "未知",
+                len(info.prompt),
+            )
+        return block
 
     # -- 主流程 ------------------------------------------------------------
     async def analyze(
@@ -257,7 +396,10 @@ class PrismAnalyzer:
     ) -> tuple[Portrait, str]:
         """执行一次分析，返回 (画像, 模型名)。"""
         provider = self.resolve_provider(umo)
-        system_prompt = build_system_prompt()
+        persona_note = await self.persona_note(umo)
+        #: 口吻要同时写进系统提示，否则会被系统提示开头那句「冷静、克制的观察者」压掉，
+        #: 表现为「开了人格但文案还是中性报告」。
+        system_prompt = build_system_prompt(persona_note=persona_note)
         user_prompt = build_user_prompt(
             spec,
             bundle,
@@ -269,15 +411,18 @@ class PrismAnalyzer:
             extra_facts=extra_facts,
             dialogue_block=dialogue_block,
             social_block=social_block,
-            persona_note=await self.persona_note(umo),
+            persona_note=persona_note,
         )
         if self._config.bool_of("persona.allow_llm_hooks"):
-            system_prompt, user_prompt = await apply_llm_hooks(
+            hooked_system, hooked_user = await apply_llm_hooks(
                 event,
                 system_prompt,
                 user_prompt,
                 logger=self._logger,
             )
+            if self._logger and (hooked_system != system_prompt or hooked_user != user_prompt):
+                self._logger.info("[人格棱镜] 其他插件的 LLM 钩子给本次分析补充了设定。")
+            system_prompt, user_prompt = hooked_system, hooked_user
         model = self._config.str_of("llm.model")
         timeout = max(30, self._config.int_of("llm.timeout_sec"))
         retries = max(0, self._config.int_of("llm.retry_times"))
@@ -317,7 +462,13 @@ class PrismAnalyzer:
                         ),
                         model,
                     )
-                payload = parse_portrait_payload(last_text)
+                repair_report: list[str] = []
+                payload = parse_portrait_payload(last_text, repair_report)
+                if payload and repair_report and repair_report[0] != "strict" and self._logger:
+                    self._logger.info(
+                        "[人格棱镜] 模型输出的 JSON 有瑕疵，已就地修补后使用（策略：%s）。",
+                        repair_report[0],
+                    )
                 if payload:
                     portrait = build_portrait(
                         payload,

@@ -26,7 +26,17 @@ from astrbot.core.star import StarTools
 from astrbot.core.star.filter.event_message_type import EventMessageType
 from quart import jsonify, request
 
-from .prism import cards, collector, dashboard, dialogue, history, love, scanning, scenes
+from .prism import (
+    cards,
+    collector,
+    dashboard,
+    dialogue,
+    history,
+    love,
+    persona_link,
+    scanning,
+    scenes,
+)
 from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
 from .prism.config import ConfigError, PrismConfig
@@ -35,7 +45,34 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.2.3"
+PLUGIN_VERSION = "v1.3.0"
+
+#: 插件自己刷出去的固定文案特征。协议端常把机器人发出去的消息当群消息回灌，
+#: 这些提示 / 兜底长文不是聊天语料，混进库里会让机器人的画像变成"插件说明书"。
+_ECHO_MARKS = (
+    "还不够生成画像",
+    "还不够结算恋爱成分",
+    "本群语料状态：",
+    "采集诊断：",
+    "文案口吻：",
+    "请到 WebUI 的「提示词」页检查",
+    "对方已用「棱镜隐身」",
+    "对方在保护名单里",
+    "本群今天的分析次数已用完",
+    "你刚刚才发起过分析",
+    "这位群友刚被分析过",
+    "同样的分析正在进行中",
+    "没认出要画谁",
+    "没认出要诊断谁",
+    "已隐身：别人无法再对你发起画像",
+    "先用「棱镜画像」生成一份",
+    "先用「画像」生成一份",
+    "下次分析会重新回溯",
+)
+_ECHO_RE = re.compile("|".join(re.escape(mark) for mark in _ECHO_MARKS))
+
+#: 记多少条"刚发出去的文案"摘要。够覆盖协议端回灌的延迟就行。
+_ECHO_MEMORY = 200
 
 #: 同一个群、同一个统计窗口，多少秒内不重复出网补齐历史。
 #: 连着发几条指令（或排行榜紧跟单人诊断）时不必把群历史再翻一遍。
@@ -116,6 +153,9 @@ _PERSONA_ID_PREFIX = "persona_prism_clone_"
 _QQ_RE = re.compile(r"^\d{5,12}$")
 _DIGITS_RE = re.compile(r"(?<!\d)(\d{5,12})(?!\d)")
 _AVATAR_TEMPLATE = "https://q1.qlogo.cn/g?b=qq&nk={uid}&s=640"
+#: 聊天现场里每个人的小头像。气泡头像只有 32px，用 100px 的小图就够，
+#: 一张卡动辄十几个头像，拉大图会明显拖慢出图。
+_AVATAR_SMALL_TEMPLATE = "https://q.qlogo.cn/headimg_dl?dst_uin={uid}&spec=100&img_type=jpg"
 _PREFIX_CHARS = "/.#!！。 \t"
 #: WebUI 预览用 data URL 的体积上限，超过就让前端别加载了。
 _CARD_PREVIEW_LIMIT = 4 * 1024 * 1024
@@ -237,8 +277,8 @@ class PersonaPrismStar(Star):
         self._window_scan: dict[str, tuple[float, bool]] = {}
         #: 节流告警的上次时间。key 是告警类别。
         self._warn_at: dict[str, float] = {}
-        #: 已清过机器人自身残留语料的「平台:群:bot」，同一进程内只清一次。
-        self._bot_purged: set[str] = set()
+        #: 插件自己刚发出去的文案摘要（有界）。协议端回灌机器人消息时用来认出它们。
+        self._own_echo: dict[str, float] = {}
 
         self._register_dashboard_apis()
         logger.info("[人格棱镜] %s 已加载，数据目录：%s", PLUGIN_VERSION, self.data_dir)
@@ -393,21 +433,47 @@ class PersonaPrismStar(Star):
 
     # ---------------------------------------------------------------- 语料采集
 
-    async def _purge_bot_rows(self, platform: str, group_id: str, self_id: str) -> None:
-        """清掉早先版本误入库的机器人自身发言，每个群每进程只清一次。"""
-        if not self_id or not group_id:
+    @staticmethod
+    def _echo_digest(text: str) -> str:
+        """文案摘要。忽略空白差异，只看前 200 字，够区分不同提示了。"""
+        body = " ".join((text or "").split())[:200]
+        return hashlib.md5(body.encode(), usedforsecurity=False).hexdigest()[:16]
+
+    def _remember_echo(self, text: str) -> None:
+        """记下插件刚发出去的一段文案。"""
+        body = (text or "").strip()
+        if len(body) < 4:
             return
-        key = f"{platform}:{group_id}:{self_id}"
-        if key in self._bot_purged:
-            return
-        self._bot_purged.add(key)
-        try:
-            removed = int(await self.astore.clear_user_corpus(platform, group_id, self_id) or 0)
-        except Exception as exc:
-            logger.debug("[人格棱镜] 清理机器人自身语料失败：%s", exc)
-            return
-        if removed:
-            logger.info("[人格棱镜] 群 %s 清掉 %s 条机器人自己的旧语料。", group_id, removed)
+        self._own_echo[self._echo_digest(body)] = time.time()
+        while len(self._own_echo) > _ECHO_MEMORY:
+            self._own_echo.pop(next(iter(self._own_echo)))
+
+    def _is_plugin_echo(self, text: str) -> bool:
+        """这条文本是不是插件自己刷出去的东西。
+
+        两道判断：进程内刚发过的原文按摘要精确命中；跨重启（比如回溯到几天前的
+        群历史）就退回固定文案特征匹配。宁可漏挡一条，也不能把真人的话当噪音扔了。
+        """
+        body = (text or "").strip()
+        if not body:
+            return False
+        if self._echo_digest(body) in self._own_echo:
+            return True
+        return bool(_ECHO_RE.search(body))
+
+    @filter.after_message_sent()
+    async def hook_remember_output(self, event: AstrMessageEvent) -> None:
+        """插件自己回过的话记一笔，免得协议端回灌后被当成机器人的"聊天记录"。
+
+        只在触发词是本插件指令时记录：其他插件、以及机器人正常聊天的回复都不碰，
+        那些内容本来就该当语料留着。
+        """
+        with contextlib.suppress(Exception):
+            if not self._is_own_command(str(getattr(event, "message_str", "") or "")):
+                return
+            result = event.get_result()
+            for comp in (getattr(result, "chain", None) or []):
+                self._remember_echo(str(getattr(comp, "text", "") or ""))
 
     async def _capture(self, event: AstrMessageEvent, platform: str, group_id: str) -> None:
         """被动记录当前这条群消息。
@@ -419,15 +485,14 @@ class PersonaPrismStar(Star):
         if not user_id:
             return
         self_id = _self_id(event)
-        if self_id and user_id == self_id:
-            #: 少数协议端会把机器人自己发出去的消息也当群消息回灌。让它入库等于
-            #: 让插件拿自己的输出画像，统计口径也会虚高，直接丢掉。
-            return
-        await self._purge_bot_rows(platform, group_id, self_id)
         segments = event.get_messages() or []
         rich = collector.parse_segments_rich(segments)
         text = rich["text"]
         if not text or self._is_own_command(text):
+            return
+        if self_id and user_id == self_id and self._is_plugin_echo(text):
+            #: 机器人自己的聊天照常入库（它继承了人格，也是群里的一员），
+            #: 但插件自己刷出去的提示和兜底长文不是语料，挡掉。
             return
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
         if not message_id:
@@ -713,8 +778,13 @@ class PersonaPrismStar(Star):
         rows = collector.parse_history_page(messages)
         rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
         if self_id:
-            #: 机器人自己刷的卡片文案不是语料，混进去会污染画像和统计口径。
-            rows = [row for row in rows if str(row.get("user_id") or "") != self_id]
+            #: 机器人自己的发言留着（它也在群里聊天），只挡插件刷出去的提示文案。
+            rows = [
+                row
+                for row in rows
+                if str(row.get("user_id") or "") != self_id
+                or not self._is_plugin_echo(str(row.get("text") or ""))
+            ]
         cleaned = collector.clean_rows(
             rows,
             min_chars=self.config.int_of("collect.min_chars"),
@@ -916,7 +986,12 @@ class PersonaPrismStar(Star):
             rows = collector.parse_history_page(messages)
             rows = [row for row in rows if not self._is_own_command(str(row.get("text") or ""))]
             if bot_id:
-                rows = [row for row in rows if str(row.get("user_id") or "") != bot_id]
+                rows = [
+                    row
+                    for row in rows
+                    if str(row.get("user_id") or "") != bot_id
+                    or not self._is_plugin_echo(str(row.get("text") or ""))
+                ]
             cleaned = collector.clean_rows(
                 rows,
                 min_chars=self.config.int_of("collect.min_chars"),
@@ -1046,6 +1121,7 @@ class PersonaPrismStar(Star):
         portrait: Any,
         bundle: CorpusBundle,
         target_id: str,
+        self_id: str = "",
     ) -> int:
         """把模型挑出的原话还原成聊天现场（呈堂证供的气泡）。
 
@@ -1080,6 +1156,7 @@ class PersonaPrismStar(Star):
             context,
             user_id=target_id,
             names=names,
+            self_id=self_id,
         )
         if filled:
             logger.info("[人格棱镜] 已为 %s/%s 条证供还原聊天现场。", filled, len(items))
@@ -1300,7 +1377,9 @@ class PersonaPrismStar(Star):
                 event=event,
             )
             with contextlib.suppress(Exception):
-                await self._restore_scenes(platform, group_id, portrait, bundle, target_id)
+                await self._restore_scenes(
+                    platform, group_id, portrait, bundle, target_id, self_id=_self_id(event)
+                )
 
             theme_choice = cards.normalize_theme_choice(
                 await self.astore.group_theme(platform, group_id) or self.config.str_of("render.theme"),
@@ -1312,7 +1391,9 @@ class PersonaPrismStar(Star):
                 portrait,
                 seed=f"{platform}:{group_id}:{target_id}",
                 avoid=(
-                    await self.astore.recent_themes(platform, group_id, limit=2)
+                    await self.astore.recent_themes(
+                        platform, group_id, limit=2, exclude_kind="love"
+                    )
                     if cards.is_auto_theme(theme_choice)
                     else ()
                 ),
@@ -1346,6 +1427,7 @@ class PersonaPrismStar(Star):
                 target_id=target_id,
                 group_name=group_name,
                 avatar_url=_AVATAR_TEMPLATE.format(uid=target_id) if platform == "aiocqhttp" else "",
+                avatar_template=_AVATAR_SMALL_TEMPLATE if platform == "aiocqhttp" else "",
                 theme=theme,
                 footer_note=self.config.str_of("render.footer_note"),
                 model=model,
@@ -1773,6 +1855,7 @@ class PersonaPrismStar(Star):
                 target_id,
                 names=names,
                 tz_offset=self._tz_offset(),
+                self_id=self_id,
             )
             if llm_portrait is not None:
                 #: 模型只看得到本人的发言，它挑出的原话要回库里配上前后文才有气泡。
@@ -1786,6 +1869,7 @@ class PersonaPrismStar(Star):
                             user_id=target_id,
                             names=names,
                             label="现场片段",
+                            self_id=self_id,
                         )
             #: 底部一行小字给普通玩家看，够交代取样口径就行；翻页是否覆盖完整之类的
             #: 排查信息只写后台日志。
@@ -1805,13 +1889,14 @@ class PersonaPrismStar(Star):
                 sample_note=sample_note,
             )
 
-            theme_choice = cards.normalize_theme_choice(self.config.str_of("love.theme"))
-            theme = cards.resolve_theme(
+            # 恋爱卡只在恋爱专属皮肤里选（樱粉 / 月下 / 黄昏 / 苏打）。
+            theme_choice = cards.normalize_love_theme_choice(self.config.str_of("love.theme"))
+            theme = cards.resolve_love_theme(
                 theme_choice,
                 portrait,
                 seed=f"{platform}:{group_id}:{target_id}:{day}:{span}",
                 avoid=(
-                    await self.astore.recent_themes(platform, group_id, limit=2)
+                    await self.astore.recent_themes(platform, group_id, limit=2, kind="love")
                     if cards.is_auto_theme(theme_choice)
                     else ()
                 ),
@@ -1845,6 +1930,7 @@ class PersonaPrismStar(Star):
                 target_id=target_id,
                 group_name=group_name,
                 avatar_url=_AVATAR_TEMPLATE.format(uid=target_id) if platform == "aiocqhttp" else "",
+                avatar_template=_AVATAR_SMALL_TEMPLATE if platform == "aiocqhttp" else "",
                 theme=theme,
                 footer_note=self.config.str_of("render.footer_note"),
                 model=model,
@@ -2404,7 +2490,7 @@ class PersonaPrismStar(Star):
             None,
             seed=f"help:{platform}:{group_id}",
             avoid=(
-                await self.astore.recent_themes(platform, group_id, limit=1)
+                await self.astore.recent_themes(platform, group_id, limit=1, exclude_kind="love")
                 if cards.is_auto_theme(theme_choice)
                 else ()
             ),
@@ -2806,7 +2892,30 @@ class PersonaPrismStar(Star):
             await self.astore.reset_scan_state(platform, group_id)
             await self.astore.set_scan_state(platform, group_id, cursor_field=report.winner)
 
-        yield event.plain_result("\n".join(history.render_probe(report, page_size=probe_size)))
+        lines = list(history.render_probe(report, page_size=probe_size))
+        lines.extend(await self._persona_probe(event))
+        yield event.plain_result("\n".join(lines))
+
+    async def _persona_probe(self, event: AstrMessageEvent) -> list[str]:
+        """自检结尾附一行「文案口吻」状态。
+
+        人格口吻只体现在措辞上，肉眼几乎分不出「开关没开」「人格没解析到」和
+        「模型没照做」三种情况。这一行把前两种当场排除掉。
+        """
+        if not self.config.bool_of("persona.use_astrbot_persona"):
+            return ["", "文案口吻：中立叙述（没有借用人格）。"]
+        info = await persona_link.resolve_persona(
+            self.context,
+            umo=event.unified_msg_origin,
+            persona_id=self.config.str_of("persona.persona_id"),
+            logger=logger,
+        )
+        if not info.usable:
+            return [
+                "",
+                "文案口吻：已开启借用人格，但这个会话没解析到可用人格，本次仍按中立叙述写。",
+            ]
+        return ["", f"文案口吻：跟着人格「{info.name or '未命名'}」写（{info.origin or '未知来源'}）。"]
 
     @filter.command("棱镜主题")
     async def cmd_theme(self, event: AstrMessageEvent):
@@ -2819,7 +2928,8 @@ class PersonaPrismStar(Star):
         if not argument:
             lines = [f"当前主题：{cards.theme_label(current)}（{current}）", "", "可选主题："]
             lines += [
-                f"  {name} · {meta['label']} —— {meta['desc']}" for name, meta in cards.THEME_CHOICES.items()
+                f"  {name} · {meta['label']} —— {meta['desc']}"
+                for name, meta in cards.PORTRAIT_THEME_CHOICES.items()
             ]
             lines += [
                 "",

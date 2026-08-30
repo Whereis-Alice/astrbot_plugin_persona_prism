@@ -72,6 +72,8 @@ def test_auto_is_a_choice_but_not_a_real_theme():
     assert cards.AUTO_THEME not in cards.THEMES
     assert cards.AUTO_THEME in cards.THEME_CHOICES
     assert list(cards.THEME_CHOICES) == [cards.AUTO_THEME, *cards.THEMES]
+    assert list(cards.PORTRAIT_THEME_CHOICES) == [cards.AUTO_THEME, *cards.PORTRAIT_THEMES]
+    assert list(cards.LOVE_THEME_CHOICES) == [cards.AUTO_THEME, *cards.LOVE_THEMES]
     assert cards.THEME_CHOICES[cards.AUTO_THEME]["label"]
     assert cards.THEME_CHOICES[cards.AUTO_THEME]["desc"]
 
@@ -137,7 +139,7 @@ def test_affinity_is_pure_content_without_luck():
     # theme_affinity 不掺抖动，所以同一张画像的原始分必须逐位相等。
     portrait = ARCHETYPES["paper"]
     assert cards.theme_affinity(portrait) == cards.theme_affinity(portrait)
-    assert set(cards.theme_affinity(portrait)) == set(cards.THEMES)
+    assert set(cards.theme_affinity(portrait)) == set(cards.PORTRAIT_THEMES)
     assert cards.theme_affinity(portrait)["paper"] > cards.theme_affinity(portrait)["neon"]
 
 
@@ -161,8 +163,11 @@ def test_content_score_is_normalised_so_long_portraits_do_not_dominate():
     terse = _portrait(headline="夜猫子")
     for portrait in (wordy, terse):
         scores = cards.theme_scores(portrait, seed="x")
-        jitter = {name: cards._stable_jitter("x", name) * cards._W_JITTER for name in cards.THEMES}
-        content = {name: scores[name] - jitter[name] for name in cards.THEMES}
+        jitter = {
+            name: cards._stable_jitter("x", name) * cards._W_JITTER
+            for name in cards.PORTRAIT_THEMES
+        }
+        content = {name: scores[name] - jitter[name] for name in cards.PORTRAIT_THEMES}
         assert max(content.values()) == cards._W_CONTENT
 
 
@@ -173,7 +178,7 @@ def test_content_score_is_normalised_so_long_portraits_do_not_dominate():
 
 def test_blank_portrait_still_gets_a_real_theme():
     for candidate in (None, _portrait(), _portrait(structured=False, raw_text="就是个普通群友")):
-        assert cards.pick_theme(candidate, seed="blank") in cards.THEMES
+        assert cards.pick_theme(candidate, seed="blank") in cards.PORTRAIT_THEMES
 
 
 def test_featureless_portraits_spread_across_all_five_themes():
@@ -181,7 +186,7 @@ def test_featureless_portraits_spread_across_all_five_themes():
     for index in range(200):
         portrait = _portrait(headline=f"群友{index}", tags=[Tag("普通")])
         counter[cards.pick_theme(portrait, seed=f"aiocqhttp:900:{10000 + index}")] += 1
-    assert set(counter) == set(cards.THEMES)
+    assert set(counter) == set(cards.PORTRAIT_THEMES)
     # 不追求严格均匀，只要没有哪一套吃掉半壁江山就算散开了。
     assert max(counter.values()) < 100
 
@@ -244,7 +249,7 @@ def test_avoid_ignores_garbage_and_extra_entries():
         seed="a",
         avoid=["", "auto", "不存在的主题", "ink", "neon", "paper", "dossier"],
     )
-    assert picked in cards.THEMES
+    assert picked in cards.PORTRAIT_THEMES
 
 
 # ---------------------------------------------------------------------------
@@ -276,3 +281,44 @@ def test_auto_theme_renders_a_real_card():
     html_out = cards.build_card_html(portrait, cards.CardContext(theme=theme, target_name="小明"))
     assert cards.theme_label(theme) in html_out
     assert "{{" not in html_out
+
+
+# ---------------------------------------------------------------------------
+# 恋爱卡专属皮肤
+# ---------------------------------------------------------------------------
+
+
+def test_love_auto_only_lands_on_love_skins():
+    counter: Counter[str] = Counter()
+    for index in range(120):
+        portrait = _portrait(headline=f"群友{index}", tags=[Tag("普通")])
+        picked = cards.resolve_love_theme(cards.AUTO_THEME, portrait, seed=f"seed{index}")
+        counter[picked] += 1
+    assert set(counter) <= set(cards.LOVE_THEMES)
+    # 四套都有机会上场，不会永远只出樱粉
+    assert len(counter) >= 2
+
+
+def test_love_theme_rejects_portrait_only_skins():
+    portrait = _portrait()
+    assert cards.resolve_love_theme("dossier", portrait) == cards.DEFAULT_LOVE_THEME
+    assert cards.resolve_love_theme("paper", portrait) == cards.DEFAULT_LOVE_THEME
+    assert cards.resolve_love_theme("moonlit", portrait) == "moonlit"
+    assert cards.resolve_love_theme("berry", portrait) == "berry"
+
+
+def test_portrait_theme_rejects_love_only_skins():
+    portrait = _portrait()
+    assert cards.normalize_love_theme_choice("moonlit") == "moonlit"
+    assert cards.normalize_love_theme_choice("aurora") == cards.DEFAULT_LOVE_THEME
+    assert cards.normalize_theme_choice("moonlit") == cards.DEFAULT_THEME
+    assert cards.normalize_theme_choice("ink") == "ink"
+    assert cards.resolve_theme("moonlit", portrait) == cards.PORTRAIT_THEMES[0]
+
+
+def test_love_skins_are_fully_registered():
+    for name in cards.LOVE_THEMES:
+        assert name in cards._THEME_CSS
+        assert name in cards.EVIDENCE_STYLE
+        assert name in cards.TITLE_BADGE_STYLE
+        assert name in cards.THEME_KEYWORDS

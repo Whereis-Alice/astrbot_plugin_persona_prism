@@ -57,7 +57,7 @@ class TestPersonaInfo:
     def test_block_mentions_name_and_keeps_rules(self):
         block = PersonaInfo(name="\u7231\u4e43", prompt="\u4f60\u662f\u4fee\u98ce\u8f66\u7684\u5c11\u5973").to_prompt_block()
         assert "\u7231\u4e43" in block
-        assert "\u53e3\u543b\u53ea\u5f71\u54cd\u63aa\u8f9e" in block
+        assert "\u7ed3\u8bba\u4e0e\u8bc4\u5206\u53ea\u80fd\u6765\u81ea\u8bed\u6599" in block
         assert "\u4f60\u662f\u4fee\u98ce\u8f66\u7684\u5c11\u5973" in block
 
     def test_long_prompt_is_truncated(self):
@@ -125,6 +125,107 @@ class TestResolvePersona:
         ctx = FakeContext(mgr, FakeConversationManager(persona_id="b"))
         info = _run(persona_link.resolve_persona(ctx, umo=""))
         assert info.name == "D"
+
+
+class FakeResolvingManager(FakePersonaManager):
+    """带 resolve_selected_persona 的新版人格管理器替身。"""
+
+    def __init__(self, by_id=None, default=None, forced=None):
+        super().__init__(by_id=by_id, default=default)
+        self._forced = forced
+        self.seen: dict[str, Any] = {}
+
+    async def resolve_selected_persona(
+        self,
+        *,
+        umo,
+        conversation_persona_id,
+        platform_name,
+        provider_settings=None,
+    ):
+        self.seen = {
+            "umo": umo,
+            "conversation_persona_id": conversation_persona_id,
+            "platform_name": platform_name,
+            "provider_settings": provider_settings,
+        }
+        if self._forced is not None:
+            return (self._forced, self._by_id.get(self._forced), self._forced, False)
+        return (conversation_persona_id, self._by_id.get(conversation_persona_id), None, False)
+
+
+class ConfigContext(FakeContext):
+    def __init__(self, persona_manager=None, conversation_manager=None, conf=None):
+        super().__init__(persona_manager, conversation_manager)
+        self._conf = conf or {}
+
+    def get_config(self, umo=None):
+        return self._conf
+
+
+class TestSessionScopedPersona:
+    """会话级强制人格是 AstrBot 里优先级最高的一层，早期版本读不到。"""
+
+    def test_session_forced_persona_beats_conversation(self):
+        mgr = FakeResolvingManager(
+            by_id={"a": {"name": "A", "prompt": "pa"}, "b": {"name": "B", "prompt": "pb"}},
+            default={"name": "D", "prompt": "pd"},
+            forced="a",
+        )
+        ctx = ConfigContext(mgr, FakeConversationManager(persona_id="b"))
+        info = _run(persona_link.resolve_persona(ctx, umo=UMO))
+        assert info.name == "A"
+        assert info.origin == "\u4f1a\u8bdd\u751f\u6548"
+
+    def test_resolver_receives_platform_and_provider_settings(self):
+        mgr = FakeResolvingManager(by_id={"b": {"name": "B", "prompt": "pb"}})
+        conf = {"provider_settings": {"default_personality": "D"}}
+        ctx = ConfigContext(mgr, FakeConversationManager(persona_id="b"), conf=conf)
+        _run(persona_link.resolve_persona(ctx, umo=UMO))
+        assert mgr.seen["platform_name"] == "aiocqhttp"
+        assert mgr.seen["provider_settings"] == {"default_personality": "D"}
+        assert mgr.seen["conversation_persona_id"] == "b"
+
+    def test_unset_conversation_persona_is_passed_as_none(self):
+        mgr = FakeResolvingManager(default={"name": "D", "prompt": "pd"})
+        ctx = ConfigContext(mgr, FakeConversationManager(persona_id=""))
+        info = _run(persona_link.resolve_persona(ctx, umo=UMO))
+        assert mgr.seen["conversation_persona_id"] is None
+        assert info.name == "D"
+        assert info.origin == "\u5168\u5c40\u9ed8\u8ba4"
+
+    def test_resolver_opt_out_is_respected(self):
+        mgr = FakeResolvingManager(default={"name": "D", "prompt": "pd"})
+        ctx = ConfigContext(
+            mgr, FakeConversationManager(persona_id=persona_link.NO_PERSONA)
+        )
+        info = _run(persona_link.resolve_persona(ctx, umo=UMO))
+        assert not info.usable
+
+    def test_config_persona_id_still_wins_over_session(self):
+        mgr = FakeResolvingManager(
+            by_id={"a": {"name": "A", "prompt": "pa"}, "z": {"name": "Z", "prompt": "pz"}},
+            forced="a",
+        )
+        ctx = ConfigContext(mgr, FakeConversationManager(persona_id="a"))
+        info = _run(persona_link.resolve_persona(ctx, umo=UMO, persona_id="z"))
+        assert info.name == "Z"
+        assert info.origin == "\u914d\u7f6e\u6307\u5b9a"
+        assert mgr.seen == {}
+
+    def test_default_persona_getter_accepting_umo(self):
+        class UmoAware:
+            def __init__(self):
+                self.got = "sentinel"
+
+            async def get_default_persona_v3(self, umo=None):
+                self.got = umo
+                return {"name": "D", "prompt": "pd"}
+
+        mgr = UmoAware()
+        info = _run(persona_link.resolve_persona(FakeContext(mgr), umo=UMO))
+        assert info.name == "D"
+        assert mgr.got == UMO
 
 
 class FakeEvent:

@@ -14,7 +14,13 @@ import re
 import time
 from typing import Any
 
-from .cards import BACKEND_LABELS, THEME_CHOICES, THEMES, theme_label
+from .cards import (
+    BACKEND_LABELS,
+    LOVE_THEME_CHOICES,
+    PORTRAIT_THEME_CHOICES,
+    THEMES,
+    theme_label,
+)
 from .config import DASHBOARD_WRITABLE, DEFAULTS, ConfigError
 from .models import PROFILE_FIELD_LABELS
 from .prompts import VALID_LAYOUTS, normalize_layout
@@ -138,7 +144,7 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
     },
     "love.theme": {
         "label": "恋爱卡主题",
-        "hint": "恋爱诊断卡单独用的主题，默认「恋色樱粉」。选「自动挡」就按每张卡的性子临场挑。",
+        "hint": "恋爱诊断卡专属的四套皮肤（樱粉 / 月下 / 黄昏 / 苏打），自动挡只在这四套里挑。",
     },
     "dialogue.context_enabled": {
         "label": "读懂上下文",
@@ -277,6 +283,16 @@ CURSOR_FIELD_CHOICES: list[dict[str, str]] = [
         "value": "id_last",
         "label": "message_id · 取本页最后一条",
         "hint": "协议端把翻页参数当消息 ID、但返回的一页是最新在前时用。",
+    },
+    {
+        "value": "seq_oldest",
+        "label": "message_seq · 取本页时间最早的一条",
+        "hint": "协议端返回的一页没按时间排序时用。",
+    },
+    {
+        "value": "id_oldest",
+        "label": "message_id · 取本页时间最早的一条",
+        "hint": "同上，但协议端把翻页参数当消息 ID。",
     },
 ]
 
@@ -438,10 +454,11 @@ def _field_meta(path: str) -> dict[str, Any]:
         meta["type"] = "choice"
         meta["choices"] = CURSOR_FIELD_CHOICES
     elif path in {"render.theme", "love.theme"}:
+        pool = LOVE_THEME_CHOICES if path == "love.theme" else PORTRAIT_THEME_CHOICES
         meta["type"] = "choice"
         meta["choices"] = [
             {"value": name, "label": info["label"], "hint": info["desc"]}
-            for name, info in THEME_CHOICES.items()
+            for name, info in pool.items()
         ]
     elif path == "privacy.include_profile_fields":
         meta["type"] = "multi"

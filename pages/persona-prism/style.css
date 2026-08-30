@@ -1659,6 +1659,16 @@ textarea {
   color: var(--text-1);
   background: var(--surface-3, var(--surface-2));
   border: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+}
+
+.cava img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .cbody {

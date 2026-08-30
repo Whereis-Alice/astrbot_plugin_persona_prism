@@ -36,6 +36,8 @@ class PersonaInfo:
 
     name: str = ""
     prompt: str = ""
+    #: 这个人格是从哪一层解析出来的，只用于日志排查（"会话生效""当前对话""全局默认""配置指定"）。
+    origin: str = ""
 
     @property
     def usable(self) -> bool:
@@ -50,10 +52,11 @@ class PersonaInfo:
             body = body[:PERSONA_LIMIT].rstrip() + "……"
         who = self.name or "你"
         return (
-            f"请以「{who}」的语气和用词习惯来写这次的文案（标题、判词、正文、建议）。\n"
-            "口吻只影响措辞，不影响结论：输出格式、字段、以及「只依据语料、禁止编造」"
-            "这些规则一律不变；也不要在文案里自我介绍或扮演对话。\n"
-            f"人格设定：\n{body}"
+            f"这次的全部文案（头衔、判词、小节正文、建议）都要由「{who}」本人写出来，"
+            "用 TA 的语气、用词习惯、自称和口癖，读起来要像 TA 在点评，而不是一份中立报告。\n"
+            "同时守住三条：结论与评分只能来自语料，输出字段和格式一个都不能少，"
+            "不要在文案里自我介绍、不要写成对话、也不要提到「人格」这两个字。\n"
+            f"「{who}」的设定：\n{body}"
         )
 
 
@@ -75,31 +78,58 @@ async def resolve_persona(
 ) -> PersonaInfo:
     """取出要用的人格。拿不到就返回空的 PersonaInfo，调用方照旧跑。
 
-    顺序：配置里写死的 persona_id → 当前会话正在用的人格 → 全局默认人格。
+    优先级和 AstrBot 自己的对话链路保持一致，从高到低：
+
+    1. 插件配置里写死的人格；
+    2. **本会话生效的人格** —— 交给 AstrBot 的 ``resolve_selected_persona`` 判定，
+       它会先看会话级强制人格（WebUI 会话管理里给某个群单独钉的那个），再看当前
+       对话的 persona_id，最后回落到全局默认人格。早期版本只读了「当前对话」这一层，
+       结果是「给群钉了人格却不生效」；
+    3. 老版本 AstrBot 没有这个解析器时，退回「当前对话 → 全局默认」的旧链路。
+
+    任何一步抛异常都静默降级成「不套用口吻」，绝不能让画像本身失败。
     """
     manager = getattr(context, "persona_manager", None)
     if manager is None:
         return PersonaInfo()
     wanted = str(persona_id or "").strip()
     persona: Any = None
+    origin = ""
     try:
         if wanted:
             persona = await _by_id(manager, wanted)
+            origin = "配置指定"
         else:
-            persona = await _from_conversation(context, manager, umo)
+            persona = await _selected_persona(context, manager, umo)
             if persona is _OPT_OUT:
+                if logger:
+                    logger.info("[人格棱镜] 本会话显式关闭了人格，这次不套用口吻。")
                 return PersonaInfo()
+            if persona is not None:
+                origin = "会话生效"
             if persona is None:
-                persona = await _default_persona(manager)
+                persona = await _from_conversation(context, manager, umo)
+                if persona is _OPT_OUT:
+                    if logger:
+                        logger.info("[人格棱镜] 本会话显式关闭了人格，这次不套用口吻。")
+                    return PersonaInfo()
+                if persona is not None:
+                    origin = "当前对话"
+            if persona is None:
+                persona = await _default_persona(manager, umo)
+                origin = "全局默认"
     except Exception as exc:  # 人格系统的实现随版本变动，失败就降级
         if logger:
-            logger.debug("读取 AstrBot 人格失败，本次不套用口吻：%s", exc)
+            logger.warning("[人格棱镜] 读取 AstrBot 人格失败，这次不套用口吻：%s", exc)
         return PersonaInfo()
     if persona is None:
+        if logger:
+            logger.info("[人格棱镜] 没找到可用的 AstrBot 人格，这次不套用口吻。")
         return PersonaInfo()
     return PersonaInfo(
         name=_persona_field(persona, "name").strip(),
         prompt=_persona_field(persona, "prompt").strip(),
+        origin=origin,
     )
 
 
@@ -113,18 +143,25 @@ async def _by_id(manager: Any, persona_id: str) -> Any:
     return result
 
 
-async def _default_persona(manager: Any) -> Any:
+async def _default_persona(manager: Any, umo: str = "") -> Any:
+    """全局默认人格。新版签名收 umo（支持按会话隔离配置），老版不收。"""
     getter = getattr(manager, "get_default_persona_v3", None)
     if getter is None:
         return None
-    result = getter()
-    if hasattr(result, "__await__"):
-        result = await result
-    return result
+    attempts: tuple[tuple[Any, ...], ...] = ((umo,), ()) if umo else ((),)
+    for args in attempts:
+        try:
+            result = getter(*args)
+        except TypeError:
+            continue
+        if hasattr(result, "__await__"):
+            result = await result
+        return result
+    return None
 
 
-async def _from_conversation(context: Any, manager: Any, umo: str) -> Any:
-    """顺着「会话 → 对话 → persona_id → 人格」找当前正在用的人格。"""
+async def _conversation_persona_id(context: Any, umo: str) -> str | None:
+    """当前对话上钉的 persona_id。None = 没设置（该回落默认人格）。"""
     if not umo:
         return None
     conv_mgr = getattr(context, "conversation_manager", None)
@@ -135,13 +172,61 @@ async def _from_conversation(context: Any, manager: Any, umo: str) -> Any:
         return None
     conversation = await conv_mgr.get_conversation(umo, cid)
     raw = str(getattr(conversation, "persona_id", "") or "")
+    return raw or None
+
+
+def _provider_settings(context: Any, umo: str) -> dict[str, Any]:
+    """当前会话生效的 provider_settings，用来取全局默认人格名。"""
+    getter = getattr(context, "get_config", None)
+    if not callable(getter):
+        return {}
+    try:
+        conf = getter(umo=umo) if umo else getter()
+        settings = conf.get("provider_settings") or {}
+    except Exception:
+        return {}
+    return dict(settings) if isinstance(settings, dict) else {}
+
+
+async def _selected_persona(context: Any, manager: Any, umo: str) -> Any:
+    """问 AstrBot：这个会话此刻到底在用哪个人格。
+
+    这是唯一能看到「会话级强制人格」的入口 —— 那份设置存在 shared preferences 里，
+    不在对话记录上，只读 conversation.persona_id 是看不到的。老版本没有这个方法时
+    返回 None，由调用方走旧链路。
+    """
+    resolver = getattr(manager, "resolve_selected_persona", None)
+    if resolver is None or not umo:
+        return None
+    conv_persona = await _conversation_persona_id(context, umo)
+    if conv_persona == NO_PERSONA:
+        return _OPT_OUT
+    result = await resolver(
+        umo=umo,
+        conversation_persona_id=conv_persona,
+        platform_name=str(umo).split(":")[0],
+        provider_settings=_provider_settings(context, umo),
+    )
+    if not isinstance(result, (tuple, list)) or not result:
+        return None
+    chosen_id = str(result[0] or "")
+    if chosen_id == NO_PERSONA:
+        return _OPT_OUT
+    persona = result[1] if len(result) > 1 else None
+    if persona is None and chosen_id:
+        persona = await _by_id(manager, chosen_id)
+    return persona
+
+
+async def _from_conversation(context: Any, manager: Any, umo: str) -> Any:
+    """旧链路：顺着「会话 → 对话 → persona_id → 人格」找当前正在用的人格。"""
+    raw = await _conversation_persona_id(context, umo)
     if raw == NO_PERSONA:
         # 用户在这个会话里显式关掉了人格，尊重这个选择，也不回落默认人格。
         return _OPT_OUT
     if not raw:
         return None
     return await _by_id(manager, raw)
-
 
 # ---------------------------------------------------------------------------
 # 第三方 on_llm_request 钩子

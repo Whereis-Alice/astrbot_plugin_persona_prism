@@ -296,3 +296,106 @@ def test_love_day_start_hour_shifts_the_boundary():
     late = _WindowStub(4)._love_day()
     assert late[1] - early[1] in {4 * 3600, 4 * 3600 - 86400}
     assert late[2] - late[1] == 86400
+
+
+# ---------------------------------------------------------------------------
+# 棱镜诊断结尾的「文案口吻」自检行
+# ---------------------------------------------------------------------------
+
+
+class _ProbeConfig:
+    def __init__(self, enabled: bool, persona_id: str = ""):
+        self._enabled = enabled
+        self._persona_id = persona_id
+
+    def bool_of(self, path):
+        assert path == "persona.use_astrbot_persona"
+        return self._enabled
+
+    def str_of(self, path):
+        assert path == "persona.persona_id"
+        return self._persona_id
+
+
+class _ProbeEvent:
+    unified_msg_origin = "aiocqhttp:GroupMessage:900"
+
+
+def _probe(enabled, persona_manager=None, persona_id=""):
+    import asyncio
+    from types import SimpleNamespace
+
+    fake_self = SimpleNamespace(
+        config=_ProbeConfig(enabled, persona_id),
+        context=SimpleNamespace(persona_manager=persona_manager),
+    )
+    return asyncio.run(main.PersonaPrismStar._persona_probe(fake_self, _ProbeEvent()))
+
+
+def test_persona_probe_says_neutral_when_switch_is_off():
+    lines = _probe(False)
+    assert any("\u4e2d\u7acb\u53d9\u8ff0" in line for line in lines)
+
+
+def test_persona_probe_flags_enabled_but_unresolved():
+    # 开关开了却没解析到人格 —— 这一行的存在就是为了当场区分这种情况。
+    lines = _probe(True, persona_manager=None)
+    joined = "".join(lines)
+    assert "\u5df2\u5f00\u542f" in joined
+    assert "\u6ca1\u89e3\u6790\u5230" in joined
+
+
+def test_persona_probe_names_the_persona_in_use():
+    class Manager:
+        def get_persona_v3_by_id(self, persona_id):
+            return {"name": "\u7231\u4e43", "prompt": "\u4fee\u98ce\u8f66\u7684\u5c11\u5973"}
+
+    lines = _probe(True, persona_manager=Manager(), persona_id="aino")
+    joined = "".join(lines)
+    assert "\u7231\u4e43" in joined
+    assert "\u914d\u7f6e\u6307\u5b9a" in joined
+
+
+# ---------------------------------------------------------------------------
+# 插件自身文案识别（机器人发言当正常人入库后的唯一防线）
+# ---------------------------------------------------------------------------
+
+
+def _echo_shell():
+    from types import SimpleNamespace
+
+    shell = SimpleNamespace(_own_echo={})
+    for name in ("_remember_echo", "_is_plugin_echo"):
+        setattr(shell, name, getattr(main.PersonaPrismStar, name).__get__(shell))
+    shell._echo_digest = main.PersonaPrismStar._echo_digest
+    return shell
+
+
+def test_plain_chat_from_the_bot_is_kept():
+    shell = _echo_shell()
+    assert shell._is_plugin_echo("我也觉得这番好看") is False
+
+
+def test_remembered_output_is_recognised_even_after_whitespace_changes():
+    shell = _echo_shell()
+    shell._remember_echo("正在给 小明 做今日恋爱诊断…")
+    assert shell._is_plugin_echo("正在给  小明  做今日恋爱诊断…")
+
+
+def test_fixed_notices_are_recognised_without_memory():
+    # 进程重启后回溯到几天前的群历史，摘要表是空的，靠固定文案特征兑上。
+    shell = _echo_shell()
+    assert shell._is_plugin_echo("小明 的有效发言只有 6 条，还不够生成画像·综合。")
+
+
+def test_short_output_is_not_remembered():
+    shell = _echo_shell()
+    shell._remember_echo("好")
+    assert shell._own_echo == {}
+
+
+def test_echo_memory_is_bounded():
+    shell = _echo_shell()
+    for index in range(main._ECHO_MEMORY + 30):
+        shell._remember_echo(f"提示文案 {index}")
+    assert len(shell._own_echo) <= main._ECHO_MEMORY

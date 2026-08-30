@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .models import Dimension, Evidence, Portrait, Section, Tag, Term
-from .scenes import center_scene, rows_to_utterances, scene_has_substance, slice_around
+from .scenes import center_scene, rows_to_utterances, scene_has_substance, scene_window
 from .titles import love_title, normalize_title
 
 #: 归一化曲线的默认斜率。normalize(20)≈46、normalize(50)≈84。
@@ -825,6 +825,7 @@ def build_scenes(
     limit: int = 3,
     context: int = 1,
     tz_offset: int = 8,
+    self_id: str = "",
 ) -> list[Evidence]:
     """从语料里裁出几段真实对话，作为公式版的现场证供。
 
@@ -870,15 +871,14 @@ def build_scenes(
         if any(abs(index - spot) <= context for spot in taken):
             continue
         stamp = int(ordered[index].get("ts") or 0)
-        window = slice_around(
+        window = scene_window(
             ordered,
             message_id=str(ordered[index].get("message_id") or ""),
             center_ts=stamp,
-            context=context,
             user_id=user_id,
             min_others=1,
         )
-        dialogue = center_scene(rows_to_utterances(window, user_id, names=nick))
+        dialogue = center_scene(rows_to_utterances(window, user_id, names=nick, self_id=self_id))
         if not dialogue or not scene_has_substance(dialogue):
             continue
         clock = time.strftime("%H:%M", time.localtime(stamp)) if stamp else ""

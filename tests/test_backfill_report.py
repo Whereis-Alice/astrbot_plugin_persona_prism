@@ -165,6 +165,7 @@ def _star(config: FakeConfig, store: FakeStore) -> SimpleNamespace:
         config=config,
         astore=store,
         _is_own_command=lambda text: False,
+        _is_plugin_echo=lambda text: False,
     )
     star._param_style = {}
     star._scan_plan = main.PersonaPrismStar._scan_plan.__get__(star)
@@ -371,7 +372,7 @@ def test_gather_in_private_chat_never_calls_the_protocol():
 
 
 # ---------------------------------------------------------------------------
-# 翻页方式自适应（v1.1.3 起，v1.1.4 扩成四种组合）
+# 翻页方式自适应（v1.1.3 起，v1.1.4 扩成四种组合，v1.3.0 再加两种时间戳兜底）
 # ---------------------------------------------------------------------------
 
 
@@ -452,9 +453,9 @@ def test_backfill_marks_stalled_instead_of_locking_exhausted():
     #: 翻页卡住 ≠ 历史挖完。写 exhausted 会让这个群以后永远只补拉最新一页。
     assert report.exhausted is False
     assert all(update["exhausted"] is False for update in store.state_updates)
-    #: 四种翻页方式都试过就收手，不要拿满配额去空转。
-    #: 首页 1 次 + 四种各 1 次 = 5 次请求（最后一种失败后无路可换，直接认输）。
-    assert len(api.calls) == 5
+    #: 六种翻页方式都试过就收手，不要拿满配额去空转。
+    #: 首页 1 次 + 六种各 1 次 = 7 次请求（最后一种失败后无路可换，直接认输）。
+    assert len(api.calls) == 7
 
 
 def test_backfill_respects_manually_locked_cursor_field():
@@ -528,7 +529,7 @@ class ReversedIdApi:
 
 
 def test_backfill_finds_strategy_that_needs_the_last_row():
-    """四种组合里最后那种也要能被试出来（用户现场的 6 条 vs 91 条）。"""
+    """六种组合里那些靠后的也要能被试出来（用户现场的 6 条 vs 91 条）。"""
     store = FakeStore()
     star = _star(FakeConfig(**{"collect.backfill_rounds": 8, "collect.page_size": 20}), store)
     pages = [list(reversed(_dual_page(start, 20))) for start in (300, 200, 100)]

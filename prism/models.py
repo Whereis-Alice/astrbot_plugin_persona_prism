@@ -199,6 +199,10 @@ class Utterance:
     mine: bool = False
     #: 这句话的时刻（HH:MM）。只为让气泡更像真截图，空串就不显示。
     clock: str = ""
+    #: 说话人的平台 uid。卡片靠它给每个人取真头像，空串就退回首字母圆牌。
+    user_id: str = ""
+    #: 这句话是不是机器人自己说的。气泡上标一下，读卡的人才知道 TA 在跟谁聊。
+    is_bot: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -206,6 +210,8 @@ class Utterance:
             "text": self.text,
             "mine": self.mine,
             "clock": self.clock,
+            "user_id": self.user_id,
+            "is_bot": self.is_bot,
         }
 
 
@@ -261,7 +267,16 @@ def _parse_dialogue(raw: Any) -> list[Utterance]:
         speaker = str(item.get("speaker") or item.get("name") or "").strip()
         mine = bool(item.get("mine")) or speaker in {SELF_SPEAKER, "本人", "我"}
         clock = str(item.get("clock") or "").strip()
-        out.append(Utterance(speaker=speaker, text=text, mine=mine, clock=clock))
+        out.append(
+            Utterance(
+                speaker=speaker,
+                text=text,
+                mine=mine,
+                clock=clock,
+                user_id=str(item.get("user_id") or "").strip(),
+                is_bot=bool(item.get("is_bot")),
+            ),
+        )
     return out
 
 
@@ -286,7 +301,16 @@ class Evidence:
                 mine = line.mine or name in {SELF_SPEAKER, "本人", "我"}
                 if mine:
                     name = speaker_name or SELF_SPEAKER
-                out.append(Utterance(speaker=name, text=text, mine=mine, clock=line.clock))
+                out.append(
+                    Utterance(
+                        speaker=name,
+                        text=text,
+                        mine=mine,
+                        clock=line.clock,
+                        user_id=line.user_id,
+                        is_bot=line.is_bot,
+                    ),
+                )
             if out:
                 return out
         quote = (self.quote or "").strip()

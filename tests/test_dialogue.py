@@ -182,10 +182,16 @@ class TestRenderLines:
         lines = dialogue.render_lines(ordered, [0], TA)
         assert "@TA" in lines[0]
 
-    def test_image_only_row_gets_placeholder(self):
+    def test_image_only_row_is_dropped(self):
+        # \u6a21\u578b\u770b\u4e0d\u89c1\u56fe\uff0c\u300c[\u56fe\u7247]\u300d\u8fdb\u73b0\u573a\u53ea\u4f1a\u5360\u7bc7\u5e45\u5e76\u8bf1\u5bfc\u5b83\u7f16\u56fe\u91cc\u6709\u4ec0\u4e48\u3002
         ordered = [_row("1", TA, "", 0, images=2)]
-        lines = dialogue.render_lines(ordered, [0], TA)
-        assert "[\u56fe\u7247\u00d72]" in lines[0]
+        assert dialogue.render_lines(ordered, [0], TA) == []
+
+    def test_placeholder_is_stripped_but_real_words_stay(self):
+        ordered = [_row("1", TA, "[\u56fe\u7247]\u7b11\u6b7b", 0)]
+        line = dialogue.render_lines(ordered, [0], TA, with_clock=False)[0]
+        assert line.endswith("\u7b11\u6b7b")
+        assert "[\u56fe\u7247]" not in line
 
     def test_clock_can_be_disabled(self):
         ordered = [_row("1", TA, "a", 0)]
@@ -265,13 +271,15 @@ class TestSocialSignals:
         sig = dialogue.social_signals(rows, TA)
         assert sig.responders[0][1] == 2
 
-    def test_bot_replies_are_not_counted_as_people(self):
+    def test_bot_replies_count_as_a_real_interaction(self):
         rows = [
             _row("1", TA, "\u5728\u5417", 0),
             _row("2", BOT, "\u5728", 10, reply_to="1"),
         ]
         sig = dialogue.social_signals(rows, TA, self_id=BOT)
-        assert sig.got_replies == 0
+        #: \u673a\u5668\u4eba\u4e5f\u662f\u7fa4\u91cc\u7684\u4e00\u5458\uff0cTA \u627e\u5b83\u8bf4\u8bdd\u5e76\u88ab\u63a5\u4f4f\uff0c\u5c31\u662f\u4e00\u6b21\u771f\u5b9e\u4e92\u52a8\u3002
+        assert sig.got_replies == 1
+        assert sig.total == 2
 
     def test_prompt_block_is_plain_facts(self):
         rows = [
@@ -437,13 +445,13 @@ class TestAnswerRate:
         assert sig.answered == 0
         assert sig.unanswered == 0
 
-    def test_bot_reply_does_not_count_as_answer(self):
+    def test_bot_reply_counts_as_an_answer(self):
         rows = [
             _row("1", TA, "\u5728\u5417", 0),
             _row("2", BOT, "\u5728", 5),
         ]
         sig = dialogue.social_signals(rows, TA, self_id=BOT)
-        assert sig.answered == 0
+        assert sig.answered == 1
         assert sig.unanswered == 0
 
     def test_answer_rate_appears_in_prompt_block(self):
@@ -453,3 +461,16 @@ class TestAnswerRate:
         ]
         block = dialogue.social_signals(rows, TA).to_prompt_block()
         assert "\u63a5\u8bdd\u7387" in block
+
+
+class TestBotLabel:
+    def test_bot_lines_are_labelled_as_you(self):
+        ordered = dialogue.order_rows([_row("1", TA, "a", 0), _row("2", BOT, "b", 5)])
+        lines = dialogue.render_lines(ordered, [0, 1], TA, self_id=BOT, with_clock=False)
+        assert any("[\u4f60]" in line for line in lines)
+        assert "[\u673a\u5668\u4eba]" not in "\n".join(lines)
+
+    def test_target_label_wins_when_the_bot_itself_is_analysed(self):
+        ordered = dialogue.order_rows([_row("1", BOT, "a", 0), _row("2", "1002", "b", 5)])
+        lines = dialogue.render_lines(ordered, [0, 1], BOT, self_id=BOT, with_clock=False)
+        assert "[TA]" in lines[0]

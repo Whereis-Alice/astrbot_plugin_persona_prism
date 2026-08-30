@@ -205,15 +205,28 @@ class PromptLibrary:
 # ---------------------------------------------------------------------------
 
 
-def build_system_prompt() -> str:
-    return _SYSTEM_PROMPT
+#: 套用人格时追加到系统提示末尾的一段。
+#: 必须写在系统提示里：光靠用户消息里的「叙述口吻」一节，会被开头那句
+#: 「冷静、克制的观察者」直接压掉，模型照旧输出中性报告。
+_VOICE_OVERRIDE = """8. 本次有指定的叙述人格（见用户消息里的「叙述口吻」一节）。
+   上面第 1 条到第 7 条约束的是你怎么判断，不约束你怎么说话：文案的语气、用词、自称、
+   口癖一律照那个人格来写，该俏皮就俏皮、该毒舌就毒舌，不要写成中立的分析报告。
+   但结论、评分、证据仍然只能来自语料，输出格式一个字段都不能少。"""
+
+
+def build_system_prompt(persona_note: str = "") -> str:
+    """骨架系统提示。传了口吻提示就追加一条「按人格说话」的授权。"""
+    if not (persona_note or "").strip():
+        return _SYSTEM_PROMPT
+    return _SYSTEM_PROMPT + "\n" + _VOICE_OVERRIDE
 
 
 #: 多人对话块的使用规则。两条红线：别人的话只能用来理解上下文，证供仍只能引 TA 本人。
-DIALOGUE_RULES = """标签含义：[TA] = 分析对象本人，[其他人] = 群里其他成员，[机器人] = 机器人自己。
+DIALOGUE_RULES = """标签含义：[TA] = 分析对象本人，[其他人] = 群里其他成员，[你] = 你自己在这个群里说过的话。
 使用规则（必须遵守）：
 1. 这一段的用途是让你看清 TA 在回应什么、被谁接话、话题怎么走向，从而判断 TA 是在对话还是在自言自语；
-2. [其他人] 和 [机器人] 说的话不属于 TA，绝对不能当作 TA 的性格、观点或行为证据；
+2. [其他人] 和 [你] 说的话不属于 TA，绝对不能当作 TA 的性格、观点或行为证据；不过 TA 找你搭话、
+   你接住 TA 的话，都算真实互动，该算进「有人理 TA」，不要因为对方是你就当它没发生；
 3. evidence 里的 quote 仍然只能逐字摘自 TA 本人的发言（[TA] 那些行，或上面「语料」一节）；
 4. 出现「……（中间略）……」表示中间跳过了无关消息，不要把断裂当成话题跳跃；
 5. 出现「……（隔了 N 分钟/小时/天）……」表示这里有一段真实的时间空档，两边不是连着说的，
@@ -287,7 +300,7 @@ def build_user_prompt(
 
     persona = (persona_note or "").strip()
     if persona:
-        blocks.append("# 叙述口吻\n" + persona)
+        blocks.append("# 叙述口吻（必须照做）\n" + persona)
 
     layout = normalize_layout(spec.layout, spec.structured)
     if layout == "card":

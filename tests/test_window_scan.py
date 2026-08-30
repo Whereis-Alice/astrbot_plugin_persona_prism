@@ -115,6 +115,7 @@ def _star(config: FakeConfig | None = None, store: FakeStore | None = None) -> S
         config=config or FakeConfig(),
         astore=store or FakeStore(),
         _is_own_command=lambda text: False,
+        _is_plugin_echo=lambda text: False,
     )
     star._param_style = {}
     star._window_scan = {}

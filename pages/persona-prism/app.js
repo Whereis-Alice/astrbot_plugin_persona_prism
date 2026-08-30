@@ -770,6 +770,22 @@ function splitSceneTitle(title, lines) {
   return { title: text, clock: (own && own.clock) || (any && any.clock) || "" };
 }
 
+//: 气泡头像。拿得到 QQ 号就直接拉真头像，失败或没有号就退回首字母色块。
+function avatarNode(line) {
+  const speaker = String((line && line.speaker) || "?");
+  const box = make("span", "cava", speaker.slice(0, 1) || "?");
+  const uid = String((line && line.user_id) || "").trim();
+  if (/^\d{5,12}$/.test(uid)) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.loading = "lazy";
+    img.src = "https://q.qlogo.cn/headimg_dl?dst_uin=" + uid + "&spec=100&img_type=jpg";
+    img.addEventListener("error", () => img.remove());
+    box.appendChild(img);
+  }
+  return box;
+}
+
 //: 头衔铭牌。头衔形如「纯爱战神（反讽）」，括注单独降一号字。
 function titleBadge(raw) {
   const text = String(raw || "").trim();
@@ -1336,7 +1352,7 @@ function renderDrawer() {
           }
           const row = make("div", line.mine ? "crow crow--mine" : "crow");
           append(row, [
-            make("span", "cava", (line.speaker || "?").slice(0, 1)),
+            avatarNode(line),
             (() => {
               const wrap = make("div", "cbody");
               const name = make("span", "cname");

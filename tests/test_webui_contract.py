@@ -373,17 +373,29 @@ def test_index_html_has_no_inline_script_body():
 
 def test_pages_do_not_call_third_party_origins():
     # w3.org 的 SVG/XML 命名空间不是网络请求，只是字符串常量，得先排掉。
+    # 群友头像只能从 QQ 官方头像站取，这是唯一放行的外链；脚本 / 样式 / 字体一律不许走 CDN。
     for blob in (APP_JS, INDEX_HTML, STYLE_CSS):
-        cleaned = blob.replace("http://www.w3.org/", "")
+        cleaned = blob.replace("http://www.w3.org/", "").replace(AVATAR_ORIGIN, "")
         assert "http://" not in cleaned
         assert "https://" not in cleaned
         for host in ("cdn.", "unpkg.com", "jsdelivr", "googleapis.com"):
             assert host not in cleaned
 
 
+def test_avatar_url_only_points_at_the_official_qq_endpoint():
+    # 头像外链只允许出现一次，且必须带 uid 拼接，避免有人顺手引入别的图床。
+    assert APP_JS.count(AVATAR_ORIGIN) == 1
+    assert AVATAR_ORIGIN not in INDEX_HTML
+    assert AVATAR_ORIGIN not in STYLE_CSS
+
+
 # ---------------------------------------------------------------------------
 # 去冲突
 # ---------------------------------------------------------------------------
+
+
+#: WebUI 唯一放行的外部来源：QQ 官方头像站，聊天现场靠它给群友配真头像。
+AVATAR_ORIGIN = "https://q.qlogo.cn/headimg_dl"
 
 
 #: 两个上游插件的包名。只能出现在致谢/来源说明里，不能变成真实标识符。

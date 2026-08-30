@@ -12,6 +12,7 @@ from astrbot_plugin_persona_prism.prism.analyzer import (
     build_portrait,
     clamp_confidence,
     extract_json_object,
+    json_fragment,
     parse_portrait_payload,
     plain_portrait,
     sample_penalty,
@@ -72,6 +73,64 @@ def test_parse_payload_returns_none_for_garbage() -> None:
 
 def test_parse_payload_unwraps_single_element_array() -> None:
     assert parse_portrait_payload('[{"headline": "x"}]') == {"headline": "x"}
+
+
+# -- 截断与全角符号的抢救 ---------------------------------------------------
+
+
+def test_json_fragment_keeps_unclosed_tail() -> None:
+    assert json_fragment('\u5f00\u573a\u767d {"a": 1, "b": "\u6ca1\u5b8c') == '{"a": 1, "b": "\u6ca1\u5b8c'
+
+
+def test_parse_recovers_truncated_payload() -> None:
+    text = (
+        '{"headline": "\u6df1\u591c\u54f2\u5b66\u5bb6", "title": "\u6df1\u591c\u54f2\u5b66\u5bb6",'
+        ' "dimensions": [{"name": "\u6d3b\u8dc3\u5ea6", "score": 80, "note": "\u5e38\u5728"}],'
+        ' "sections": [{"title": "\u6982\u8ff0", "body": "\u4ed6\u603b\u5728\u51cc\u6668'
+    )
+    payload = parse_portrait_payload(text)
+    assert payload is not None
+    assert payload["headline"] == "\u6df1\u591c\u54f2\u5b66\u5bb6"
+    assert payload["dimensions"][0]["score"] == 80
+
+
+def test_parse_reports_repair_strategy() -> None:
+    report: list[str] = []
+    parse_portrait_payload('{"headline": "\u6b63\u5e38"}', report)
+    assert report == ["strict"]
+    report.clear()
+    parse_portrait_payload('{"headline": "\u6b8b\u7247", "tags": [', report)
+    assert report and report[0] != "strict"
+
+
+def test_parse_fixes_fullwidth_structure_symbols() -> None:
+    text = '{"headline"\uff1a"\u6df1\u591c"\uff0c"title": "\u591c\u732b"}'
+    payload = parse_portrait_payload(text)
+    assert payload == {"headline": "\u6df1\u591c", "title": "\u591c\u732b"}
+
+
+def test_parse_keeps_fullwidth_symbols_inside_quotes() -> None:
+    #: \u8bc1\u636e\u533a\u8981\u9010\u5b57\u4fdd\u7559\u539f\u8bdd\uff0c\u6b63\u6587\u91cc\u7684\u4e2d\u6587\u6807\u70b9\u4e0d\u80fd\u88ab\u6539\u6210\u82f1\u6587\u6807\u70b9\u3002
+    text = '{"quote": "\u4eca\u5929\u597d\u7d2f\uff0c\u4f46\u662f\u503c\u5f97\uff1a\u771f\u7684"}'
+    payload = parse_portrait_payload(text)
+    assert payload is not None
+    assert payload["quote"] == "\u4eca\u5929\u597d\u7d2f\uff0c\u4f46\u662f\u503c\u5f97\uff1a\u771f\u7684"
+
+
+def test_parse_escapes_raw_newline_inside_string() -> None:
+    text = '{"sections": [{"title": "\u6982\u8ff0", "body": "\u7b2c\u4e00\u884c\n\u7b2c\u4e8c\u884c"}]}'
+    payload = parse_portrait_payload(text)
+    assert payload is not None
+    assert payload["sections"][0]["body"] == "\u7b2c\u4e00\u884c\n\u7b2c\u4e8c\u884c"
+
+
+def test_parse_drops_dangling_key_after_truncation() -> None:
+    payload = parse_portrait_payload('{"headline": "\u5728", "advice"')
+    assert payload == {"headline": "\u5728"}
+
+
+def test_parse_still_returns_none_for_pure_prose() -> None:
+    assert parse_portrait_payload("\u8fd9\u4eba\u5f88\u6709\u8da3\uff0c\u6ca1\u6709\u4efb\u4f55 JSON\u3002") is None
 
 
 # -- 置信度 -----------------------------------------------------------------

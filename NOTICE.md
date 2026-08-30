@@ -38,6 +38,22 @@
 
 在此向 SXP-Simon 及上游项目致谢。
 
+## astrbot_plugin_qq_group_daily_analysis
+
+- 作者：SXP-Simon
+- 仓库：https://github.com/SXP-Simon/astrbot_plugin_qq_group_daily_analysis
+- 许可：MIT License
+
+本插件（v1.3.0 起）参考了上游的以下实现思路：
+
+1. 在仿聊天界面的证据展示里为每位参与者拉取 QQ 头像（`q.qlogo.cn` 头像模板）；
+2. 对 LLM 返回的不完整 / 全角标点 JSON 做容错修补而不是直接失败（本插件另写了区分引号内外的安全实现）；
+3. 翻群历史时按时间戳定位本页最旧消息作为下一页游标。
+
+上述三点均为重写实现，未直接复制上游代码。
+
+在此向 SXP-Simon 及上游项目致谢。
+
 ---
 
 其他第三方依赖：

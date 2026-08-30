@@ -38,9 +38,20 @@ THEMES: dict[str, dict[str, str]] = {
     "paper": {"label": "杂志排版", "desc": "浅色刊物风，衬线大标题"},
     "dossier": {"label": "机密档案", "desc": "牛皮纸档案袋 + 打字机字体"},
     "sakura": {"label": "恋色樱粉", "desc": "Y2K 恋爱游戏风，粉紫渐变 + 圆角糖果色"},
+    "moonlit": {"label": "月下夜话", "desc": "深靛夜色 + 月华金，适合暗恋与深夜拉扯"},
+    "dusk": {"label": "黄昏电车", "desc": "橘紫残阳 + 胶片颗粒，适合久处与回忆"},
+    "berry": {"label": "莓果苏打", "desc": "苏打蓝撞莓果粉，适合直球与热恋"},
 }
 
+#: 画像 / 棱镜系列的可选主题。后三套是恋爱卡专用皮肤，不参与画像的自动挡。
+PORTRAIT_THEMES: tuple[str, ...] = ("aurora", "ink", "neon", "paper", "dossier", "sakura")
+
+#: 恋爱诊断卡只在这四套里选。机密档案 / 杂志排版这类皮肤放恋爱卡上完全不是一回事，
+#: 所以恋爱卡单独养一批夜色 / 黄昏 / 苏打 / 樱粉的主题。
+LOVE_THEMES: tuple[str, ...] = ("sakura", "moonlit", "dusk", "berry")
+
 DEFAULT_THEME = "aurora"
+DEFAULT_LOVE_THEME = "sakura"
 
 #: 每套主题的「证供面板」文案（标题 / 水印 / 徽章前缀 / 缺省场景名）。
 #: 同一份数据在不同主题下会换一套口吻，避免所有卡片都长成一个样。
@@ -51,6 +62,9 @@ EVIDENCE_STYLE: dict[str, dict[str, str]] = {
     "paper": {"title": "采访实录 · TRANSCRIPT", "mark": "RECORD", "badge": "实录", "fallback": "实录片段"},
     "dossier": {"title": "监听记录 · INTERCEPT", "mark": "INTERCEPT", "badge": "物证", "fallback": "监听片段"},
     "sakura": {"title": "心动物证 · EVIDENCE", "mark": "EVIDENCE", "badge": "心动", "fallback": "心动瞬间"},
+    "moonlit": {"title": "夜谈回响 · ECHO", "mark": "ECHO", "badge": "夜话", "fallback": "夜里的一段"},
+    "dusk": {"title": "黄昏放映 · FILM", "mark": "FILM", "badge": "放映", "fallback": "黄昏的一幕"},
+    "berry": {"title": "气泡回放 · SODA", "mark": "SODA", "badge": "气泡", "fallback": "冒泡的一段"},
 }
 
 #: 每套主题的「头衔」铭牌装饰。只有左右两枚小纹样，不写「称号」这种说明文字 ——
@@ -62,6 +76,9 @@ TITLE_BADGE_STYLE: dict[str, dict[str, str]] = {
     "paper": {"glyph": "❦", "wing": "❦"},
     "dossier": {"glyph": "✚", "wing": "✚"},
     "sakura": {"glyph": "♡", "wing": "♡"},
+    "moonlit": {"glyph": "☾", "wing": "☽"},
+    "dusk": {"glyph": "❀", "wing": "❀"},
+    "berry": {"glyph": "♥", "wing": "♥"},
 }
 
 #: 头衔里的尾部括注，例如「纯爱战神（反讽）」的「反讽」。
@@ -96,8 +113,20 @@ AUTO_THEME_META: dict[str, str] = {
     "desc": "看画像的性子临场挑一套，同一个群连着画也不容易撞",
 }
 
-#: 可配置 / 可切换的全部档位 = 自动挡 + 五套真主题。THEMES 仍然只装真主题。
+#: 可配置 / 可切换的全部档位 = 自动挡 + 全部真主题。THEMES 仍然只装真主题。
 THEME_CHOICES: dict[str, dict[str, str]] = {AUTO_THEME: AUTO_THEME_META, **THEMES}
+
+#: 画像 / 棱镜卡的可选档位（render.theme、「棱镜主题」）。
+PORTRAIT_THEME_CHOICES: dict[str, dict[str, str]] = {
+    AUTO_THEME: AUTO_THEME_META,
+    **{name: THEMES[name] for name in PORTRAIT_THEMES},
+}
+
+#: 恋爱卡的可选档位（love.theme）。自动挡在这四套里挑。
+LOVE_THEME_CHOICES: dict[str, dict[str, str]] = {
+    AUTO_THEME: AUTO_THEME_META,
+    **{name: THEMES[name] for name in LOVE_THEMES},
+}
 
 #: 自动挡的选题词表。刻意写成「意象词」而不是人格量表术语：
 #: 画像里出现的是形容词和网络口语，不是 OCEAN 五因素的标准表述。
@@ -127,7 +156,29 @@ THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
         "温暖", "热情", "元气", "活泼", "可爱", "亲和", "治愈", "共情", "体贴", "捧场",
         "情绪", "细腻", "浪漫", "分享", "社交", "氛围", "热心", "撒娇", "情感", "柔软",
     ),
+    "moonlit": (
+        "暗恋", "深夜", "夜聊", "凌晨", "心事", "意难平", "遗憾", "内耗", "忍", "藏",
+        "模糊", "试探", "拉扯", "纠缠", "犹豫", "若即若离", "单向", "冷淡", "距离", "守",
+    ),
+    "dusk": (
+        "回忆", "旧", "习惯", "陆久", "长期", "稳定", "温吐", "慢热", "陪", "日常",
+        "平淡", "余温", "收尾", "告别", "遗忘", "老友", "兼容", "熟", "念旧", "拖",
+    ),
+    "berry": (
+        "直球", "主动", "秒回", "上头", "冲", "黏", "撒糖", "高频", "起哄", "玩闹",
+        "起劲", "直接", "猛", "快", "热闹", "撩", "追", "开朗", "大方", "麦霸",
+    ),
 }
+
+#: 恋爱卡自动挡的维度轴。恋爱画像的维度名是固定的五项（纯爱值 / 存在感 /
+#: 白月光 / 败犬值 / 恋爱成分），所以这里直接按名字对。
+_LOVE_AXES: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (("纯爱",), "berry", "moonlit"),
+    (("存在感",), "sakura", "moonlit"),
+    (("白月光",), "dusk", "berry"),
+    (("败犬",), "dusk", "sakura"),
+    (("恋爱成分",), "sakura", "moonlit"),
+)
 
 #: 维度名命中左边的词时，按分数高低给主题加权：分高偏 high、分低偏 low。
 #: 这是启发式而不是心理学结论——够用就行，真正决定性的还是标签和文字。
@@ -151,6 +202,22 @@ _W_CONFIDENCE = 0.8   # 置信度过低（资料少 → 「档案未完成」的
 _DIM_HIGH_AT = 68
 _DIM_LOW_AT = 32
 
+#: 标签整体偏负 / 偏正时各偏向哪套主题（权重为 _W_POLARITY 的倍数）。
+#: 两个池子各给一份：画像池里“负”是高冷毒舌，恋爱池里“负”是意难平。
+_POLARITY_BIAS: dict[str, dict[str, tuple[tuple[str, float], ...]]] = {
+    "portrait": {
+        "negative": (("dossier", 1.0), ("neon", 0.5)),
+        "positive": (("aurora", 0.75), ("paper", 1 / 3)),
+    },
+    "love": {
+        "negative": (("moonlit", 1.0), ("dusk", 0.45)),
+        "positive": (("berry", 0.8), ("sakura", 0.6)),
+    },
+}
+
+#: 置信度过低（语料少、结论虚）时加分的主题。
+_LOW_CONFIDENCE_BIAS: dict[str, str] = {"portrait": "dossier", "love": "moonlit"}
+
 #: 归一化之后的三档权重，决定「内容 / 运气 / 避重复」谁说话更响：
 #: 气质明显的画像（比如满屏熬夜玩梗）拿满 3.0，第二名通常不到 1.0，
 #: 所以内容说得清时它稳赢；两三套主题打得难分时，抖动和避重复才决定结果。
@@ -168,9 +235,13 @@ def is_auto_theme(name: str) -> bool:
 
 
 def normalize_theme_choice(name: str) -> str:
-    """校验「配置层」的主题值：允许 auto，其它未知值回落默认主题。"""
+    """校验画像 / 棱镜卡「配置层」的主题值：允许 auto，其它未知值回落默认主题。
+
+    恋爱卡专用皮肤（LOVE_THEMES 里的新三套）不算合法值 —— 它们的文案和纹样
+    是奉着恋爱诊断写的，拿去渲染人格画像会很奇怪。
+    """
     value = str(name or "").strip().lower()
-    return value if value in THEME_CHOICES else DEFAULT_THEME
+    return value if value in PORTRAIT_THEME_CHOICES else DEFAULT_THEME
 
 
 def describe_theme_choice(choice: str, resolved: str = "") -> str:
@@ -190,17 +261,19 @@ THEME_ALIASES: dict[str, str] = {
 }
 
 
-def match_theme_choice(text: str) -> str:
+def match_theme_choice(text: str, choices: dict[str, dict[str, str]] | None = None) -> str:
     """把用户输入认成一个档位。认不出来返回空串。"""
+    table = choices if choices is not None else PORTRAIT_THEME_CHOICES
     wanted = str(text or "").strip().lower()
     if not wanted:
         return ""
-    if wanted in THEME_CHOICES:
+    if wanted in table:
         return wanted
-    for name, meta in THEME_CHOICES.items():
+    for name, meta in table.items():
         if wanted == meta["label"].lower():
             return name
-    return THEME_ALIASES.get(wanted, "")
+    alias = THEME_ALIASES.get(wanted, "")
+    return alias if alias in table else ""
 
 def _theme_signal_text(portrait: Portrait | None) -> tuple[str, str]:
     """把画像压成两段文本：strong（标题/标签/维度名）与 weak（正文/原话/建议）。"""
@@ -229,9 +302,35 @@ def _stable_jitter(seed: str, theme: str) -> float:
     return int.from_bytes(digest, "big") / float(1 << 64)
 
 
-def theme_affinity(portrait: Portrait | None) -> dict[str, float]:
-    """只看内容的「气质贴合度」原始分，不含运气也不含避重复。"""
-    scores = dict.fromkeys(THEMES, 0.0)
+def _pool_names(pool: Sequence[str] | None) -> tuple[str, ...]:
+    """把候选池参数归一成一串真主题名。不传 = 画像 / 棱镜那一池。"""
+    names = tuple(dict.fromkeys(name for name in (pool or PORTRAIT_THEMES) if name in THEMES))
+    return names or PORTRAIT_THEMES
+
+
+def _pool_kind(names: Sequence[str]) -> str:
+    """这批候选该用哪套启发式：全落在恋爱池里就按恋爱那套算。"""
+    return "love" if set(names) <= set(LOVE_THEMES) else "portrait"
+
+
+def theme_affinity(
+    portrait: Portrait | None,
+    *,
+    pool: Sequence[str] | None = None,
+) -> dict[str, float]:
+    """只看内容的「气质贴合度」原始分，不含运气也不含避重复。
+
+    pool 限定候选范围：画像卡在 PORTRAIT_THEMES 里选，恋爱卡在 LOVE_THEMES 里选。
+    两个池子的维度轴与正负偏向不同（见 _LOVE_AXES / _POLARITY_BIAS）。
+    """
+    names = _pool_names(pool)
+    kind = _pool_kind(names)
+    scores = dict.fromkeys(names, 0.0)
+
+    def bump(name: str, weight: float) -> None:
+        if name in scores:
+            scores[name] += weight
+
     strong, weak = _theme_signal_text(portrait)
     for name, words in THEME_KEYWORDS.items():
         if name not in scores:
@@ -245,26 +344,27 @@ def theme_affinity(portrait: Portrait | None) -> dict[str, float]:
     if portrait is None:
         return scores
     for dim in portrait.dimensions:
-        for words, high, low in _DIMENSION_AXES:
+        for words, high, low in _LOVE_AXES if kind == "love" else _DIMENSION_AXES:
             if not any(word in dim.name for word in words):
                 continue
             if dim.score >= _DIM_HIGH_AT:
-                scores[high] += _W_DIM_HIGH
+                bump(high, _W_DIM_HIGH)
             elif dim.score <= _DIM_LOW_AT:
-                scores[low] += _W_DIM_LOW
+                bump(low, _W_DIM_LOW)
     tags = portrait.tags
     if tags:
         neg = sum(1 for tag in tags if tag.polarity == "negative") / len(tags)
         pos = sum(1 for tag in tags if tag.polarity == "positive") / len(tags)
+        bias = _POLARITY_BIAS[kind]
         if neg >= 0.4:
-            scores["dossier"] += _W_POLARITY
-            scores["neon"] += _W_POLARITY / 2
+            for name, ratio in bias["negative"]:
+                bump(name, _W_POLARITY * ratio)
         elif pos >= 0.6:
-            scores["aurora"] += _W_POLARITY * 0.75
-            scores["paper"] += _W_POLARITY / 3
+            for name, ratio in bias["positive"]:
+                bump(name, _W_POLARITY * ratio)
     if 0 < portrait.confidence < 0.45:
-        # 语料少、结论虚 → 「档案未完成」的气质刚好对上。
-        scores["dossier"] += _W_CONFIDENCE
+        # 语料少、结论虚 → 「档案未完成」/「夜里看不清」的气质刚好对上。
+        bump(_LOW_CONFIDENCE_BIAS[kind], _W_CONFIDENCE)
     return scores
 
 
@@ -273,6 +373,7 @@ def theme_scores(
     *,
     seed: str = "",
     avoid: Sequence[str] = (),
+    pool: Sequence[str] | None = None,
 ) -> dict[str, float]:
     """自动挡的最终打分。分最高的那套就是结论。
 
@@ -281,11 +382,11 @@ def theme_scores(
     1. **内容分**：把 theme_affinity 的原始分归一化，最贴的那套得满分 _W_CONTENT。
        归一化很关键——画像长短差别很大，长画像随手就能命中十几个词，
        不归一化的话「文字多」会盖过「运气」和「避重复」，档位就退化成固定主题了。
-    2. **抖动**：由 seed 和主题名算出的稳定伪随机数，负责在气质难分时拍板。
+    2. **拖动**：由 seed 和主题名算出的稳定伪随机数，负责在气质难分时拍板。
     3. **避重复**：本群最近用过的主题降权，让连着画的人不容易撞同一套。
        唯一的例外是内容分一边倒的时候（见 _AVOID_SKIP_MARGIN），此时以内容为准。
     """
-    affinity = theme_affinity(portrait)
+    affinity = theme_affinity(portrait, pool=pool)
     top = max(affinity.values(), default=0.0)
     content = {
         name: (raw / top * _W_CONTENT if top > 0 else 0.0) for name, raw in affinity.items()
@@ -309,6 +410,7 @@ def pick_theme(
     *,
     seed: str = "",
     avoid: Sequence[str] = (),
+    pool: Sequence[str] | None = None,
 ) -> str:
     """按画像内容挑一套主题。
 
@@ -316,9 +418,9 @@ def pick_theme(
     但画像内容每次分析都不一样，加上 avoid 排掉本群最近用过的，
     实际效果就是「一群人轮着画，主题一直在换」。
     """
-    scores = theme_scores(portrait, seed=seed, avoid=avoid)
-    # 先按分数，再按 THEMES 的固定顺序，保证结果可复现。
-    order = list(THEMES)
+    scores = theme_scores(portrait, seed=seed, avoid=avoid, pool=pool)
+    # 先按分数，再按候选池的固定顺序，保证结果可复现。
+    order = list(_pool_names(pool))
     return max(order, key=lambda name: (scores[name], -order.index(name)))
 
 
@@ -328,11 +430,32 @@ def resolve_theme(
     *,
     seed: str = "",
     avoid: Sequence[str] = (),
+    pool: Sequence[str] | None = None,
 ) -> str:
     """把「配置层的档位」翻译成「真正用来渲染的主题」。"""
+    names = _pool_names(pool)
     if is_auto_theme(choice):
-        return pick_theme(portrait, seed=seed, avoid=avoid)
-    return normalize_theme(choice)
+        return pick_theme(portrait, seed=seed, avoid=avoid, pool=names)
+    resolved = normalize_theme(choice)
+    # 不属于本池的手动选择（比如旧配置把恋爱卡设成了机密档案）回落池里第一套。
+    return resolved if resolved in names else names[0]
+
+
+def resolve_love_theme(
+    choice: str,
+    portrait: Portrait | None = None,
+    *,
+    seed: str = "",
+    avoid: Sequence[str] = (),
+) -> str:
+    """恋爱卡专用：只在 LOVE_THEMES 里解析 / 挑选。"""
+    return resolve_theme(choice, portrait, seed=seed, avoid=avoid, pool=LOVE_THEMES)
+
+
+def normalize_love_theme_choice(name: str) -> str:
+    """校验恋爱卡的主题配置值：允许 auto，其它未知值回落樱粉。"""
+    value = str(name or "").strip().lower()
+    return value if value in LOVE_THEME_CHOICES else DEFAULT_LOVE_THEME
 
 
 def _esc(value: Any) -> str:
@@ -363,6 +486,9 @@ class CardContext:
     target_id: str = ""
     group_name: str = ""
     avatar_url: str = ""
+    #: 群友头像的 URL 模板（含 {uid} 占位符）。聊天现场靠它给每个人配真头像，
+    #: 拿不到就自动退回首字母色块，不会留空洞。
+    avatar_template: str = ""
     theme: str = DEFAULT_THEME
     footer_note: str = "人格棱镜 · Persona Prism"
     model: str = ""
@@ -1002,6 +1128,162 @@ _THEME_CSS: dict[str, str] = {
 .title-badge .tb-inner { border-radius: 11px; }
 .tag { font-weight: 600; }
 """,
+    "moonlit": """
+:root {
+  --page-bg: radial-gradient(1150px 660px at 78% -14%, #3b3570 0%, #211d46 42%, #0d0b1c 100%);
+  --radius: 28px;
+  --card-bg: linear-gradient(158deg, rgba(52,46,102,.78) 0%, rgba(28,25,60,.9) 56%, rgba(17,15,36,.94) 100%);
+  --card-border: 1px solid rgba(186,170,255,.24);
+  --card-shadow: 0 38px 88px rgba(8,6,24,.66);
+  --card-veil: radial-gradient(420px 420px at 86% 8%, rgba(255,226,170,.22), transparent 68%),
+               radial-gradient(560px 320px at 2% 92%, rgba(150,130,255,.2), transparent 74%);
+  --ink: #d8d2f2;
+  --ink-strong: #f6f1ff;
+  --ink-dim: #aca4d4;
+  --ink-mute: #8b83b4;
+  --accent: #ffd9a0;
+  --accent-soft: rgba(255,217,160,.44);
+  --accent-ink: #ffe4b8;
+  --rule: rgba(186,170,255,.2);
+  --chip-bg: rgba(150,132,235,.18);
+  --chip-border: 1px solid rgba(186,170,255,.22);
+  --quote-bg: rgba(120,104,200,.16);
+  --bub-bg: rgba(160,144,240,.12);
+  --bub-border: 1px solid rgba(186,170,255,.2);
+  --bub-me-bg: rgba(255,217,160,.18);
+  --bub-me-border: 1px solid rgba(255,217,160,.4);
+  --bub-me-ink: #fff4e2;
+  --bub-radius: 15px;
+  --chat-bg: rgba(14,12,32,.5);
+  --chat-head: rgba(150,132,235,.16);
+  --block-bg: rgba(26,23,54,.6);
+  --block-border: 1px solid rgba(186,170,255,.16);
+  --bar-bg: rgba(150,140,200,.22);
+  --bar-fill: linear-gradient(90deg, #ffd9a0, #b79bff);
+  --radar-fill: rgba(255,217,160,.18);
+  --avatar-radius: 50%;
+  --avatar-bg: rgba(150,132,235,.22);
+  --avatar-border: 2px solid rgba(255,225,180,.55);
+  --badge-bg: rgba(255,217,160,.13);
+  --badge-ink: #ffe4b8;
+  --badge-border: 1px solid rgba(255,217,160,.36);
+  --badge-fold: rgba(255,217,160,.44);
+  --tag-pos-bg: rgba(150,225,205,.15); --tag-pos-ink: #9ceedb; --tag-pos-line: rgba(150,225,205,.34);
+  --tag-neu-bg: rgba(170,158,245,.18); --tag-neu-ink: #cfc4ff; --tag-neu-line: rgba(170,158,245,.36);
+  --tag-neg-bg: rgba(255,140,175,.15); --tag-neg-ink: #ffaac2; --tag-neg-line: rgba(255,140,175,.34);
+  --font-title: "Noto Serif SC", "Songti SC", "Source Han Serif SC", serif;
+  --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.kicker { letter-spacing: .3em; }
+.sec h3::before { content: "☾ "; color: var(--accent); }
+.title-badge { border-radius: 13px; box-shadow: 0 10px 26px rgba(10,6,30,.5); }
+.title-badge .tb-inner { border-radius: 10px; opacity: .6; }
+""",
+    "dusk": """
+:root {
+  --page-bg: linear-gradient(178deg, #4a2f66 0%, #8f4a63 34%, #d9744f 68%, #f0a86a 100%);
+  --radius: 24px;
+  --card-bg: linear-gradient(162deg, rgba(58,32,58,.9) 0%, rgba(84,42,58,.9) 48%, rgba(46,26,48,.94) 100%);
+  --card-border: 1px solid rgba(255,196,150,.28);
+  --card-shadow: 0 34px 78px rgba(46,18,26,.6);
+  --card-veil: radial-gradient(520px 300px at 88% 10%, rgba(255,176,110,.26), transparent 70%),
+               radial-gradient(480px 300px at 4% 96%, rgba(120,70,140,.28), transparent 74%),
+               repeating-linear-gradient(0deg, rgba(255,255,255,.04) 0 1px, transparent 1px 4px);
+  --ink: #f3ddcc;
+  --ink-strong: #fff3e6;
+  --ink-dim: #d5ab9b;
+  --ink-mute: #b0857a;
+  --accent: #ffb066;
+  --accent-soft: rgba(255,176,102,.42);
+  --accent-ink: #ffc98f;
+  --rule: rgba(255,196,150,.22);
+  --chip-bg: rgba(255,176,110,.16);
+  --chip-border: 1px solid rgba(255,196,150,.26);
+  --quote-bg: rgba(255,160,110,.13);
+  --bub-bg: rgba(255,214,180,.1);
+  --bub-border: 1px solid rgba(255,196,150,.22);
+  --bub-me-bg: rgba(255,176,102,.2);
+  --bub-me-border: 1px solid rgba(255,176,102,.44);
+  --bub-me-ink: #fff1e0;
+  --bub-radius: 13px;
+  --chat-bg: rgba(40,20,34,.5);
+  --chat-head: rgba(255,176,110,.14);
+  --block-bg: rgba(58,30,50,.58);
+  --block-border: 1px solid rgba(255,196,150,.18);
+  --bar-bg: rgba(220,170,150,.22);
+  --bar-fill: linear-gradient(90deg, #ffb066, #e0648c);
+  --radar-fill: rgba(255,176,102,.2);
+  --avatar-radius: 12px;
+  --avatar-bg: rgba(255,176,110,.2);
+  --avatar-border: 2px solid rgba(255,206,160,.55);
+  --badge-bg: rgba(255,176,102,.14);
+  --badge-ink: #ffc98f;
+  --badge-border: 1px solid rgba(255,176,102,.38);
+  --badge-fold: rgba(255,176,102,.46);
+  --tag-pos-bg: rgba(180,220,150,.16); --tag-pos-ink: #cfe9a8; --tag-pos-line: rgba(180,220,150,.34);
+  --tag-neu-bg: rgba(255,200,160,.16); --tag-neu-ink: #ffd9b5; --tag-neu-line: rgba(255,200,160,.34);
+  --tag-neg-bg: rgba(230,110,140,.18); --tag-neg-ink: #ff9db8; --tag-neg-line: rgba(230,110,140,.36);
+  --font-title: "Noto Serif SC", "Songti SC", "Source Han Serif SC", serif;
+  --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.kicker { letter-spacing: .28em; }
+.sec h3::before { content: "❀ "; color: var(--accent); }
+.title-badge { border-radius: 4px; box-shadow: 0 10px 24px rgba(50,16,26,.46); }
+.title-badge .tb-inner { border-radius: 2px; opacity: .55; }
+""",
+    "berry": """
+:root {
+  --page-bg: radial-gradient(1100px 620px at 12% -10%, #cfefff 0%, #b9dcff 40%, #ffd3e6 100%);
+  --radius: 32px;
+  --card-bg: linear-gradient(150deg, #ffffff 0%, #f6fbff 56%, #fff0f6 100%);
+  --card-border: 3px solid #ffffff;
+  --card-shadow: 0 30px 70px rgba(96,132,190,.3);
+  --card-veil: radial-gradient(420px 260px at 90% 4%, rgba(255,120,170,.16), transparent 70%),
+               radial-gradient(460px 280px at 2% 96%, rgba(90,190,255,.18), transparent 72%);
+  --ink: #3f5673;
+  --ink-strong: #1f3350;
+  --ink-dim: #6a7f9c;
+  --ink-mute: #91a3bb;
+  --accent: #ff4f81;
+  --accent-soft: rgba(255,79,129,.34);
+  --accent-ink: #e12f66;
+  --rule: rgba(120,170,220,.3);
+  --chip-bg: rgba(120,190,255,.16);
+  --chip-border: 1px solid rgba(120,180,235,.34);
+  --quote-bg: rgba(214,238,255,.7);
+  --bub-bg: #ffffff;
+  --bub-border: 1px solid rgba(120,180,235,.32);
+  --bub-me-bg: rgba(255,79,129,.14);
+  --bub-me-border: 1px solid rgba(255,79,129,.38);
+  --bub-me-ink: #7d1c3c;
+  --bub-radius: 18px;
+  --chat-bg: rgba(238,248,255,.86);
+  --chat-head: rgba(120,190,255,.16);
+  --block-bg: rgba(243,250,255,.9);
+  --block-border: 1px solid rgba(120,180,235,.28);
+  --bar-bg: rgba(150,200,240,.28);
+  --bar-fill: linear-gradient(90deg, #45c6ff, #ff4f81);
+  --radar-fill: rgba(255,79,129,.18);
+  --avatar-radius: 50%;
+  --avatar-bg: rgba(120,190,255,.24);
+  --avatar-border: 3px solid #ffffff;
+  --badge-bg: rgba(255,79,129,.12);
+  --badge-ink: #e12f66;
+  --badge-border: 1px solid rgba(255,79,129,.36);
+  --badge-fold: rgba(255,79,129,.46);
+  --tag-pos-bg: rgba(64,214,168,.18); --tag-pos-ink: #17845f; --tag-pos-line: rgba(64,214,168,.4);
+  --tag-neu-bg: rgba(110,180,255,.18); --tag-neu-ink: #2b6fb5; --tag-neu-line: rgba(110,180,255,.4);
+  --tag-neg-bg: rgba(255,110,150,.18); --tag-neg-ink: #cc2f5e; --tag-neg-line: rgba(255,110,150,.4);
+  --font-title: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-body: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.kicker { letter-spacing: .24em; }
+.badge { font-weight: 700; }
+.sec h3::before { content: "♥ "; color: var(--accent); }
+.title-badge { border-radius: 999px; box-shadow: 0 10px 24px rgba(255,79,129,.24); }
+.title-badge .tb-inner { border-radius: 999px; opacity: .5; }
+.tag { font-weight: 700; border-radius: 999px; }
+""",
 }
 
 
@@ -1084,6 +1366,11 @@ _EVIDENCE_CSS = """
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.20);
 }
 .cava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.cbot {
+  font-style: normal; font-size: 9px; letter-spacing: .1em; line-height: 1;
+  padding: 2px 4px; border-radius: 4px; opacity: .8;
+  background: var(--chip-bg); border: var(--chip-border);
+}
 .ccol { display: flex; flex-direction: column; gap: 4px; max-width: 78%; min-width: 0; }
 .crow.right .ccol { align-items: flex-end; }
 .cnm {
@@ -1380,6 +1667,16 @@ def _metrics_html(portrait: Portrait) -> str:
     )
 
 
+#: 不同玩法的面板标题。恋爱卡叫「画像正文」总归怪，就分开叫。
+_PANEL_TITLES: dict[str, dict[str, str]] = {
+    "love": {"sections": "诊断正文", "advice": "恋爱建议"},
+}
+
+
+def _panel_title(kind: str, slot: str, default: str) -> str:
+    return _PANEL_TITLES.get(kind or "", {}).get(slot, default)
+
+
 def _sections_html(portrait: Portrait) -> str:
     if not portrait.sections:
         return ""
@@ -1390,7 +1687,11 @@ def _sections_html(portrait: Portrait) -> str:
     )
     if not blocks:
         return ""
-    return f'<div class="panel"><div class="panel-title">画像正文</div><div class="secs">{blocks}</div></div>'
+    title = _panel_title(portrait.kind, "sections", "画像正文")
+    return (
+        f'<div class="panel"><div class="panel-title">{_esc(title)}</div>'
+        f'<div class="secs">{blocks}</div></div>'
+    )
 
 
 def _speaker_color(name: str) -> str:
@@ -1419,8 +1720,20 @@ def _split_scene_title(title: str, lines: Sequence[Utterance]) -> tuple[str, str
     return text, clock
 
 
+def _avatar_src(line: Utterance, ctx: CardContext) -> str:
+    """这句话的头像地址。本人用已经取好的那张，其他人按模板拼。"""
+    if not ctx.show_avatar:
+        return ""
+    if line.mine and ctx.avatar_url:
+        return ctx.avatar_url
+    uid = (line.user_id or "").strip()
+    if uid and ctx.avatar_template and "{uid}" in ctx.avatar_template:
+        return ctx.avatar_template.replace("{uid}", uid)
+    return ""
+
+
 def _chat_row_html(line: Utterance, ctx: CardContext) -> str:
-    """一行聊天气泡。本人靠右并尽量用真头像，其他人靠左用首字母头像。"""
+    """一行聊天气泡。本人靠右，其他人靠左；有真头像就用，取不到退首字母色块。"""
     text = (line.text or "").strip()
     if not text:
         return ""
@@ -1429,15 +1742,18 @@ def _chat_row_html(line: Utterance, ctx: CardContext) -> str:
     side = "right" if line.mine else "left"
     name = (line.speaker or "").strip() or (ctx.target_name if line.mine else "群友")
     avatar = f'<span class="cava" style="background:{_speaker_color(name)}">'
-    avatar += _initial(name, ctx.target_id if line.mine else "")
-    if line.mine and ctx.show_avatar and ctx.avatar_url:
-        avatar += f'<img src="{_esc(ctx.avatar_url)}" alt="" onerror="this.style.display=\'none\'"/>'
+    avatar += _initial(name, line.user_id or (ctx.target_id if line.mine else ""))
+    src = _avatar_src(line, ctx)
+    if src:
+        avatar += f'<img src="{_esc(src)}" alt="" onerror="this.style.display=\'none\'"/>'
     avatar += "</span>"
     clock = f'<span class="ctm">{_esc(line.clock)}</span>' if line.clock else ""
+    #: 机器人自己那几句也在场（继承了人格，说的就是"我"），挂个小标让读卡的人分得清。
+    flag = '<i class="cbot">BOT</i>' if line.is_bot and not line.mine else ""
     return (
         f'<div class="crow {side}">{avatar}'
         '<div class="ccol">'
-        f'<div class="cnm"><b>{_esc(name)}</b>{clock}</div>'
+        f'<div class="cnm"><b>{_esc(name)}</b>{flag}{clock}</div>'
         f'<div class="cbub">{_esc(text)}</div>'
         "</div></div>"
     )
@@ -1543,7 +1859,11 @@ def _advice_html(portrait: Portrait) -> str:
     if not items:
         return ""
     body = "".join(f"<li>{_esc(line)}</li>" for line in items)
-    return f'<div class="panel"><div class="panel-title">相处建议</div><ul class="advice">{body}</ul></div>'
+    title = _panel_title(portrait.kind, "advice", "相处建议")
+    return (
+        f'<div class="panel"><div class="panel-title">{_esc(title)}</div>'
+        f'<ul class="advice">{body}</ul></div>'
+    )
 
 
 def _foot_html(portrait: Portrait, ctx: CardContext) -> str:

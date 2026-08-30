@@ -188,11 +188,14 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
 VALID_THEMES = ("aurora", "ink", "neon", "paper", "dossier", "sakura")
 #: 配置项 render.theme 还多一个 "auto"（自动挡）：它不是配色，而是「按画像临场挑一套」。
 VALID_THEME_CHOICES = ("auto", *VALID_THEMES)
+#: 恋爱卡单独一批主题：机密档案 / 杂志排版那套皮肤放恋爱诊断上完全不是一回事。
+VALID_LOVE_THEMES = ("sakura", "moonlit", "dusk", "berry")
+VALID_LOVE_THEME_CHOICES = ("auto", *VALID_LOVE_THEMES)
 VALID_BACKENDS = ("auto", "local_first", "t2i_only", "text_only")
 VALID_SAMPLING = ("layered", "recent")
 VALID_IMAGE_FORMATS = ("jpeg", "png")
 #: 翻群历史时用哪种翻页方式。名字含义 = 读哪个字段 + 取这一页的哪一端，
-#: 四种组合详见 prism.history；auto = 自动逐个试探并记住每个群实测可用的那种。
+#: 六种组合详见 prism.history；auto = 自动逐个试探并记住每个群实测可用的那种。
 #: 末尾两个是 v1.1.3 的旧名字，保留是为了不让升级前存下来的配置被校验拒掉。
 VALID_CURSOR_FIELDS = (
     "auto",
@@ -200,6 +203,8 @@ VALID_CURSOR_FIELDS = (
     "id_first",
     "seq_last",
     "id_last",
+    "seq_oldest",
+    "id_oldest",
     "message_seq",
     "message_id",
 )
@@ -210,7 +215,7 @@ _ENUMS: dict[str, tuple[str, ...]] = {
     "render.image_format": VALID_IMAGE_FORMATS,
     "collect.sampling": VALID_SAMPLING,
     "collect.cursor_field": VALID_CURSOR_FIELDS,
-    "love.theme": VALID_THEME_CHOICES,
+    "love.theme": VALID_LOVE_THEME_CHOICES,
 }
 
 _RANGES: dict[str, tuple[int, int]] = {

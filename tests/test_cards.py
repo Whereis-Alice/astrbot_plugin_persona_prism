@@ -61,12 +61,32 @@ def _ctx(**kw):
 # ---------------------------------------------------------------------------
 
 
-def test_themes_have_six_entries_with_label_and_desc():
-    assert len(cards.THEMES) == 6
-    assert set(cards.THEMES) == {"aurora", "ink", "neon", "paper", "dossier", "sakura"}
+def test_themes_registry_covers_portrait_and_love_skins():
+    assert len(cards.THEMES) == 9
+    assert set(cards.THEMES) == {
+        "aurora",
+        "ink",
+        "neon",
+        "paper",
+        "dossier",
+        "sakura",
+        "moonlit",
+        "dusk",
+        "berry",
+    }
     for meta in cards.THEMES.values():
         assert meta["label"]
         assert meta["desc"]
+
+
+def test_portrait_and_love_pools_are_subsets_of_registry():
+    assert cards.PORTRAIT_THEMES == ("aurora", "ink", "neon", "paper", "dossier", "sakura")
+    assert cards.LOVE_THEMES == ("sakura", "moonlit", "dusk", "berry")
+    for name in (*cards.PORTRAIT_THEMES, *cards.LOVE_THEMES):
+        assert name in cards.THEMES
+    # 恋爱专属皮肤不能流到画像的可选项里
+    assert set(cards.LOVE_THEMES) - set(cards.PORTRAIT_THEMES) == {"moonlit", "dusk", "berry"}
+    assert cards.DEFAULT_LOVE_THEME in cards.LOVE_THEMES
 
 
 def test_default_theme_is_registered():
@@ -516,3 +536,73 @@ def test_title_badge_shows_no_explanatory_label():
 def test_title_badge_is_escaped():
     html = cards.build_card_html(_portrait(title="<script>x</script>"), _ctx())
     assert "<script>" not in html
+
+# ---------------------------------------------------------------------------
+# 聊天现场的头像
+# ---------------------------------------------------------------------------
+
+
+def _scene_portrait():
+    return _portrait(
+        evidence=[
+            Evidence(
+                quote="\u6211\u6765\u4fee",
+                dialogue=[
+                    Utterance(speaker="\u963f\u5149", text="\u8fd9\u6bb5\u4ee3\u7801\u5d29\u4e86", user_id="20002"),
+                    Utterance(
+                        speaker="\u5c0f\u660e",
+                        text="\u6211\u6765\u4fee",
+                        mine=True,
+                        user_id="10001",
+                    ),
+                    Utterance(
+                        speaker="\u963f\u826f",
+                        text="\u9760\u4f60\u4e86",
+                        user_id="30003",
+                        is_bot=True,
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def test_every_speaker_in_the_scene_gets_a_real_avatar():
+    html_out = cards.build_card_html(
+        _scene_portrait(),
+        _ctx(avatar_template="https://avatar.test/{uid}.jpg"),
+    )
+    assert "https://avatar.test/20002.jpg" in html_out
+    assert "https://avatar.test/30003.jpg" in html_out
+    # 本人用已经取好的那张，不走模板。
+    assert "https://avatar.test/10001.jpg" not in html_out
+    assert "nk=10001" in html_out
+
+
+def test_scene_avatar_falls_back_to_the_initial_when_no_template():
+    html_out = cards.build_card_html(_scene_portrait(), _ctx())
+    assert "avatar.test" not in html_out
+    assert '<span class="cava' in html_out
+    assert "\u963f" in html_out
+
+
+def test_scene_avatar_is_skipped_when_avatars_are_off():
+    html_out = cards.build_card_html(
+        _scene_portrait(),
+        _ctx(avatar_template="https://avatar.test/{uid}.jpg", show_avatar=False),
+    )
+    assert "avatar.test" not in html_out
+
+
+def test_bot_line_in_the_scene_is_flagged():
+    html_out = cards.build_card_html(_scene_portrait(), _ctx())
+    assert 'class="cbot"' in html_out
+    assert html_out.count('class="cbot"') == 1
+
+
+def test_avatar_template_without_placeholder_is_ignored():
+    html_out = cards.build_card_html(
+        _scene_portrait(),
+        _ctx(avatar_template="https://avatar.test/fixed.jpg"),
+    )
+    assert "avatar.test" not in html_out
