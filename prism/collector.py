@@ -252,8 +252,14 @@ def clean_rows(
     filter_commands: bool = True,
     drop_urls: bool = True,
     redact: bool = True,
+    keep_media: bool = False,
 ) -> list[CorpusMessage]:
-    """清洗成 CorpusMessage 列表，顺带按 message_id 去重并按时间升序排序。"""
+    """清洗成 CorpusMessage 列表，顺带按 message_id 去重并按时间升序排序。
+
+    keep_media=True 时，纯图片 / 纯表情这类「没文字但确实是一次发言」的消息也会入库。
+    它们进不了送给模型的语料（build_bundle 仍然过滤），但恋爱诊断要按天数发言条数，
+    把它们整条丢掉会让活跃用户看起来「今天一句话没说」。
+    """
     seen: set[str] = set()
     result: list[CorpusMessage] = []
     for row in rows:
@@ -264,7 +270,8 @@ def clean_rows(
         if filter_commands and is_command_like(raw_text):
             continue
         text = normalize_text(raw_text, redact=redact, drop_urls=drop_urls)
-        if not informative(text, min_chars):
+        images = max(0, int(row.get("images") or 0))
+        if not informative(text, min_chars) and not (keep_media and images > 0):
             continue
         if message_id:
             seen.add(message_id)
@@ -277,7 +284,7 @@ def clean_rows(
                 ts=to_epoch_seconds(row.get("ts")),
                 is_reply=bool(row.get("is_reply")),
                 reply_to=str(row.get("reply_to") or ""),
-                images=max(0, int(row.get("images") or 0)),
+                images=images,
                 at_ids=str(row.get("at_ids") or ""),
             ),
         )

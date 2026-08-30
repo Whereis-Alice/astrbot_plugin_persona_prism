@@ -27,7 +27,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from .models import Portrait
+from .models import Portrait, Term, Utterance
 
 #: 卡片主题。label 会显示在 WebUI 和 "棱镜主题" 命令里。
 THEMES: dict[str, dict[str, str]] = {
@@ -40,6 +40,17 @@ THEMES: dict[str, dict[str, str]] = {
 }
 
 DEFAULT_THEME = "aurora"
+
+#: 每套主题的「证供面板」文案（标题 / 水印 / 徽章前缀 / 缺省场景名）。
+#: 同一份数据在不同主题下会换一套口吻，避免所有卡片都长成一个样。
+EVIDENCE_STYLE: dict[str, dict[str, str]] = {
+    "aurora": {"title": "现场留影 · MOMENTS", "mark": "MOMENTS", "badge": "片段", "fallback": "现场片段"},
+    "ink": {"title": "片语存卷", "mark": "存卷", "badge": "卷", "fallback": "片语一则"},
+    "neon": {"title": "聊天回放 · REPLAY", "mark": "REPLAY", "badge": "LOG", "fallback": "回放片段"},
+    "paper": {"title": "采访实录 · TRANSCRIPT", "mark": "RECORD", "badge": "实录", "fallback": "实录片段"},
+    "dossier": {"title": "监听记录 · INTERCEPT", "mark": "INTERCEPT", "badge": "物证", "fallback": "监听片段"},
+    "sakura": {"title": "心动物证 · EVIDENCE", "mark": "EVIDENCE", "badge": "心动", "fallback": "心动瞬间"},
+}
 
 _JINJA_TOKEN_RE = re.compile(r"\{(?=[{%#])")
 
@@ -655,6 +666,12 @@ _THEME_CSS: dict[str, str] = {
   --chip-bg: rgba(120,150,220,.16);
   --chip-border: 1px solid rgba(150,180,255,.2);
   --quote-bg: rgba(120,160,240,.13);
+  --bub-bg: rgba(150,180,255,.10);
+  --bub-border: 1px solid rgba(150,180,255,.20);
+  --bub-me-bg: rgba(127,227,255,.20);
+  --bub-me-border: 1px solid rgba(127,227,255,.42);
+  --bub-me-ink: #eaf9ff;
+  --bub-radius: 14px;
   --block-bg: rgba(18,24,48,.55);
   --block-border: 1px solid rgba(150,180,255,.15);
   --bar-bg: rgba(140,160,210,.2);
@@ -693,6 +710,12 @@ _THEME_CSS: dict[str, str] = {
   --chip-bg: rgba(120,105,80,.1);
   --chip-border: 1px solid rgba(120,105,80,.2);
   --quote-bg: rgba(200,180,140,.2);
+  --bub-bg: #fffdf6;
+  --bub-border: 1px solid rgba(60,50,40,.16);
+  --bub-me-bg: rgba(156,59,50,.12);
+  --bub-me-border: 1px solid rgba(156,59,50,.30);
+  --bub-me-ink: #3a2b24;
+  --bub-radius: 4px;
   --block-bg: rgba(255,252,244,.7);
   --block-border: 1px solid rgba(120,105,80,.18);
   --bar-bg: rgba(120,105,80,.16);
@@ -733,6 +756,12 @@ _THEME_CSS: dict[str, str] = {
   --chip-bg: rgba(0,255,214,.08);
   --chip-border: 1px solid rgba(0,255,214,.25);
   --quote-bg: rgba(0,255,214,.07);
+  --bub-bg: rgba(255,255,255,.05);
+  --bub-border: 1px solid rgba(0,255,214,.20);
+  --bub-me-bg: rgba(0,255,214,.12);
+  --bub-me-border: 1px solid rgba(0,255,214,.42);
+  --bub-me-ink: #d8fff8;
+  --bub-radius: 10px;
   --block-bg: rgba(255,255,255,.03);
   --block-border: 1px solid rgba(0,255,214,.16);
   --bar-bg: rgba(255,255,255,.08);
@@ -772,6 +801,12 @@ _THEME_CSS: dict[str, str] = {
   --chip-bg: #f3f1eb;
   --chip-border: 1px solid #e2ded4;
   --quote-bg: #f7f5f0;
+  --bub-bg: #f7f5f0;
+  --bub-border: 1px solid #e6e1d6;
+  --bub-me-bg: #fdf1ea;
+  --bub-me-border: 1px solid #f0d6cd;
+  --bub-me-ink: #241f16;
+  --bub-radius: 3px;
   --block-bg: #fbfaf7;
   --block-border: 1px solid #eeebe4;
   --bar-bg: #ecebe6;
@@ -812,6 +847,12 @@ _THEME_CSS: dict[str, str] = {
   --chip-bg: rgba(90,76,48,.12);
   --chip-border: 1px dashed rgba(80,68,44,.4);
   --quote-bg: rgba(255,250,232,.5);
+  --bub-bg: rgba(255,250,232,.75);
+  --bub-border: 1px dashed rgba(90,70,45,.35);
+  --bub-me-bg: rgba(138,43,30,.10);
+  --bub-me-border: 1px dashed rgba(138,43,30,.42);
+  --bub-me-ink: #3b2a1c;
+  --bub-radius: 2px;
   --block-bg: rgba(252,246,228,.62);
   --block-border: 1px solid rgba(80,68,44,.22);
   --bar-bg: rgba(80,68,44,.18);
@@ -853,6 +894,12 @@ _THEME_CSS: dict[str, str] = {
   --chip-bg: rgba(255,160,205,.2);
   --chip-border: 1px solid rgba(255,140,190,.36);
   --quote-bg: rgba(255,225,240,.72);
+  --bub-bg: #fffdfe;
+  --bub-border: 1px solid rgba(255,160,205,.34);
+  --bub-me-bg: rgba(255,140,190,.22);
+  --bub-me-border: 1px solid rgba(255,120,180,.44);
+  --bub-me-ink: #46203b;
+  --bub-radius: 16px;
   --block-bg: rgba(255,247,251,.82);
   --block-border: 1px solid rgba(255,160,205,.3);
   --bar-bg: rgba(255,170,208,.26);
@@ -890,6 +937,105 @@ _EXTRA_CSS = """
 .metrics.solo .dims { flex: 1 1 100%; }
 .note { margin-top: 20px; font-size: 12.5px; line-height: 1.65; color: var(--ink-mute); }
 .empty { font-size: 14px; color: var(--ink-mute); }
+"""
+
+
+#: 「证供面板」+ 演化算式 + 术语速查的样式。追加在 _EXTRA_CSS 里，三条卡片链路都能用。
+_EVIDENCE_CSS = """
+.evs { display: flex; flex-direction: column; gap: 16px; }
+.ev {
+  position: relative; overflow: hidden;
+  padding: 15px 18px 15px; border-radius: 16px;
+  background: var(--block-bg); border: var(--block-border);
+}
+.ev-mark {
+  position: absolute; right: 14px; bottom: 2px;
+  font-family: var(--font-title); font-size: 30px; letter-spacing: .18em;
+  color: var(--ink-strong); opacity: .07;
+}
+.ev-head { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
+.ev-badge {
+  font-family: var(--font-title); font-size: 10.5px; letter-spacing: .14em;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+  background: var(--badge-bg); color: var(--badge-ink); border: var(--badge-border);
+}
+.ev-title { font-size: 13px; color: var(--ink-dim); }
+.ev-why {
+  margin-top: 12px; padding-left: 11px;
+  border-left: 2px solid var(--accent-soft);
+  font-size: 12.5px; line-height: 1.6; color: var(--ink-mute);
+}
+
+.chat { display: flex; flex-direction: column; gap: 10px; position: relative; }
+.crow { display: flex; gap: 9px; align-items: flex-start; }
+.crow.right { flex-direction: row-reverse; }
+.cava {
+  flex: 0 0 32px; width: 32px; height: 32px; border-radius: 11px;
+  position: relative; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-title); font-size: 14px; color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.20);
+}
+.cava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.ccol { display: flex; flex-direction: column; gap: 4px; max-width: 76%; }
+.crow.right .ccol { align-items: flex-end; }
+.cnm { font-size: 11.5px; color: var(--ink-mute); padding: 0 3px; }
+.cbub {
+  position: relative;
+  padding: 9px 13px; border-radius: var(--bub-radius, 14px);
+  font-size: 14.5px; line-height: 1.62; color: var(--ink);
+  background: var(--bub-bg, var(--quote-bg));
+  border: var(--bub-border, 1px solid var(--rule));
+  white-space: pre-wrap; word-break: break-word;
+}
+.crow.left .cbub { border-top-left-radius: 5px; }
+.crow.right .cbub {
+  color: var(--bub-me-ink, var(--ink-strong));
+  background: var(--bub-me-bg, var(--quote-bg));
+  border: var(--bub-me-border, 1px solid var(--accent-soft));
+  border-top-right-radius: 5px;
+}
+.cbub::before {
+  content: ""; position: absolute; top: 12px;
+  width: 0; height: 0; border: 5px solid transparent;
+}
+.crow.left .cbub::before {
+  left: -9px; border-left: 0;
+  border-right-color: var(--bub-bg, var(--quote-bg));
+}
+.crow.right .cbub::before {
+  right: -9px; border-right: 0;
+  border-left-color: var(--bub-me-bg, var(--quote-bg));
+}
+
+.eq {
+  padding: 15px 18px; border-radius: 14px; text-align: center;
+  background: var(--quote-bg); border: var(--block-border);
+  font-family: "JetBrains Mono","Cascadia Code","DejaVu Sans Mono",Consolas,Menlo,monospace;
+  font-size: 14px; line-height: 1.75; color: var(--ink-strong);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+.terms { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.term {
+  padding: 12px 14px; border-radius: 13px;
+  background: var(--block-bg); border: var(--block-border);
+}
+.term-head { display: flex; align-items: center; gap: 7px; margin-bottom: 5px; }
+.term-code {
+  font-family: var(--font-title); font-size: 10.5px; letter-spacing: .08em;
+  min-width: 18px; text-align: center; padding: 2px 6px; border-radius: 7px;
+  background: var(--badge-bg); color: var(--badge-ink); border: var(--badge-border);
+}
+.term-name { font-size: 13.5px; font-weight: 600; color: var(--ink-strong); }
+.term-brief { font-size: 12.5px; line-height: 1.55; color: var(--ink-dim); }
+.term-detail { margin-top: 4px; font-size: 12px; line-height: 1.55; color: var(--ink-mute); }
+
+.notes {
+  margin-top: 20px; padding-top: 14px; border-top: 1px dashed var(--rule);
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 12.5px; line-height: 1.65; color: var(--ink-mute);
+}
 """
 
 #: Markdown 卡片专用样式（"画像"系列的自由排版输出走这套）。
@@ -1105,25 +1251,115 @@ def _sections_html(portrait: Portrait) -> str:
     return f'<div class="panel"><div class="panel-title">画像正文</div><div class="secs">{blocks}</div></div>'
 
 
-def _quotes_html(portrait: Portrait, ctx: CardContext) -> str:
+def _speaker_color(name: str) -> str:
+    """按昵称稳定生成头像底色，同一个人在任何卡片上都是同一个颜色。"""
+    digest = hashlib.blake2b((name or "?").encode(), digest_size=4).digest()
+    hue = int.from_bytes(digest, "big") % 360
+    return f"hsl({hue} 46% 46%)"
+
+
+def _chat_row_html(line: Utterance, ctx: CardContext) -> str:
+    """一行聊天气泡。本人靠右并尽量用真头像，其他人靠左用首字母头像。"""
+    side = "right" if line.mine else "left"
+    name = (line.speaker or "").strip() or (ctx.target_name if line.mine else "群友")
+    avatar = f'<span class="cava" style="background:{_speaker_color(name)}">'
+    avatar += _initial(name, ctx.target_id if line.mine else "")
+    if line.mine and ctx.show_avatar and ctx.avatar_url:
+        avatar += f'<img src="{_esc(ctx.avatar_url)}" alt="" onerror="this.style.display=\'none\'"/>'
+    avatar += "</span>"
+    return (
+        f'<div class="crow {side}">{avatar}'
+        '<div class="ccol">'
+        f'<div class="cnm">{_esc(name)}</div>'
+        f'<div class="cbub">{_esc(line.text)}</div>'
+        "</div></div>"
+    )
+
+
+def _evidence_html(portrait: Portrait, ctx: CardContext) -> str:
+    """证供面板：把选中的原话还原成一小段聊天记录，比干巴巴的引用更有现场感。"""
     if not ctx.show_evidence or not portrait.evidence:
         return ""
-    items: list[str] = []
-    for item in portrait.evidence[:5]:
-        if not item.quote:
+    style = EVIDENCE_STYLE.get(normalize_theme(ctx.theme), EVIDENCE_STYLE[DEFAULT_THEME])
+    blocks: list[str] = []
+    for index, item in enumerate(portrait.evidence[:5], start=1):
+        lines = item.scene_lines(ctx.target_name)
+        if not lines:
             continue
-        reason = f'<div class="r">{_esc(item.reason)}</div>' if item.reason else ""
-        items.append(
-            f'<div class="quote"><div class="q">“{_esc(item.quote)}”</div>{reason}</div>',
+        rows = "".join(_chat_row_html(line, ctx) for line in lines[:6])
+        title = (item.title or "").strip() or style["fallback"]
+        reason = (item.reason or "").strip()
+        why = f'<div class="ev-why">{_esc(reason)}</div>' if reason else ""
+        blocks.append(
+            '<div class="ev">'
+            f'<div class="ev-mark">{_esc(style["mark"])}</div>'
+            '<div class="ev-head">'
+            f'<span class="ev-badge">{_esc(style["badge"])} {index:02d}</span>'
+            f'<span class="ev-title">{_esc(title)}</span>'
+            "</div>"
+            f'<div class="chat">{rows}</div>'
+            f"{why}"
+            "</div>",
         )
-    if not items:
+    if not blocks:
         return ""
     return (
         '<div class="panel">'
-        '<div class="panel-title">原话证据</div>'
-        f'<div class="quotes">{"".join(items)}</div>'
+        f'<div class="panel-title">{_esc(style["title"])}</div>'
+        f'<div class="evs">{"".join(blocks)}</div>'
         "</div>"
     )
+
+
+def _equation_html(portrait: Portrait) -> str:
+    """演化算式：把本地公式的推导过程摊开给人看，别让分数像凭空冒出来的。"""
+    text = (portrait.equation or "").strip()
+    if not text:
+        return ""
+    return (
+        '<div class="panel">'
+        '<div class="panel-title">演化算式</div>'
+        f'<div class="eq">{_esc(text)}</div>'
+        "</div>"
+    )
+
+
+def _glossary_html(portrait: Portrait) -> str:
+    """术语速查：解释卡片里出现的自造词，避免看完一脸问号。"""
+    terms: list[Term] = [term for term in portrait.glossary[:6] if term.name or term.brief]
+    if not terms:
+        return ""
+    cards: list[str] = []
+    for term in terms:
+        code = f'<span class="term-code">{_esc(term.code)}</span>' if term.code else ""
+        detail = f'<div class="term-detail">{_esc(term.detail)}</div>' if term.detail else ""
+        cards.append(
+            '<div class="term">'
+            f'<div class="term-head">{code}<span class="term-name">{_esc(term.name)}</span></div>'
+            f'<div class="term-brief">{_esc(term.brief)}</div>'
+            f"{detail}"
+            "</div>",
+        )
+    return (
+        '<div class="panel">'
+        '<div class="panel-title">术语速查</div>'
+        f'<div class="terms">{"".join(cards)}</div>'
+        "</div>"
+    )
+
+
+def _notes_html(portrait: Portrait, ctx: CardContext) -> str:
+    """样本说明统一挂在卡片最底部，不再插在正文中间打断阅读。"""
+    notes: list[str] = []
+    note = (portrait.sample_note or "").strip()
+    if note:
+        notes.append(note)
+    if ctx.sample_size and ctx.sample_size < 20:
+        notes.append("样本偏少，结论仅作参考；多聊几天后重新生成会更准。")
+    if not notes:
+        return ""
+    body = "".join(f"<span>{_esc(text)}</span>" for text in notes)
+    return f'<div class="notes">{body}</div>'
 
 
 def _advice_html(portrait: Portrait) -> str:
@@ -1324,15 +1560,17 @@ def build_card_html(portrait: Portrait, ctx: CardContext) -> str:
     渲染出来的画面完全一致。
     """
     theme = normalize_theme(ctx.theme)
-    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS
+    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS + _EVIDENCE_CSS
 
     if portrait.structured:
         body_parts = [
             f'<div class="headline">{_esc(portrait.headline)}</div>' if portrait.headline else "",
             _tags_html(portrait),
             _metrics_html(portrait),
+            _equation_html(portrait),
             _sections_html(portrait),
-            _quotes_html(portrait, ctx),
+            _evidence_html(portrait, ctx),
+            _glossary_html(portrait),
             _advice_html(portrait),
         ]
         body = "".join(part for part in body_parts if part)
@@ -1342,10 +1580,10 @@ def build_card_html(portrait: Portrait, ctx: CardContext) -> str:
         text = portrait.raw_text or portrait.headline
         body = f'<div class="panel"><div class="raw">{_esc(text)}</div></div>'
 
-    if ctx.sample_size and ctx.sample_size < 20:
-        body += '<div class="note">样本偏少，结论仅作参考；多聊几天后重新生成会更准。</div>'
-
-    inner = f"{_hero_html(ctx)}{body}{_foot_html(portrait, ctx)}"
+    inner = (
+        f"{_hero_html(ctx)}{body}"
+        f"{_foot_html(portrait, ctx)}{_notes_html(portrait, ctx)}"
+    )
     return _document(ctx, css, inner, badge=theme_label(theme))
 
 
@@ -1564,7 +1802,7 @@ def build_markdown_card_html(
 ) -> str:
     """把一段 Markdown 正文渲染成与画像卡片同主题的完整 HTML 文档。"""
     theme = normalize_theme(ctx.theme)
-    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS + _MD_CSS
+    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS + _EVIDENCE_CSS + _MD_CSS
     body = markdown_to_html(source)
     if not body:
         body = '<div class="empty">这次没有解析到可展示的内容。</div>'
@@ -1776,7 +2014,7 @@ def build_help_card_html(card: HelpCard, ctx: CardContext) -> str:
     与画像卡片共用主题变量，所以「棱镜主题」切到哪套，帮助卡就跟着变。
     """
     theme = normalize_theme(ctx.theme)
-    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS + _HELP_CSS
+    css = _THEME_CSS[theme] + _BASE_CSS + _EXTRA_CSS + _EVIDENCE_CSS + _HELP_CSS
 
     groups = [group for group in card.groups if group.items]
     accents = [_help_accent(group, pos) for pos, group in enumerate(groups)]

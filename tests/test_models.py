@@ -152,7 +152,7 @@ def test_to_plain_text_renders_all_blocks() -> None:
     assert text.startswith("【人格画像】阿狸")
     assert "标签：动手派 / 夜猫子" in text
     assert "【说话风格】" in text
-    assert "【原话依据】" in text
+    assert "【现场证供】" in text
     assert "【建议】" in text
     assert "置信度 71%" in text
 

@@ -298,6 +298,11 @@ class PrismStore:
                     at_ids = CASE
                         WHEN excluded.at_ids != '' THEN excluded.at_ids
                         ELSE corpus.at_ids
+                    END,
+                    -- 早期被动采集可能没拿到时间戳，重新扫到时补一个有效值
+                    ts = CASE
+                        WHEN corpus.ts <= 0 AND excluded.ts > 0 THEN excluded.ts
+                        ELSE corpus.ts
                     END
                 """,
                 payload,
@@ -631,6 +636,30 @@ class PrismStore:
             }
             for row in rows
         ]
+
+    def context_rows(
+        self,
+        platform: str,
+        group_id: str,
+        center_ts: int,
+        *,
+        span: int = 1800,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """取某个时刻前后一段时间的本群语料，用来还原「那句话」的聊天现场。
+
+        送给模型的语料只有目标本人的发言，所以模型挑出证供以后，得回库里把当时
+        前后几句一起捞出来，卡片才能画成真实的对话截图。
+        """
+        center = int(center_ts)
+        reach = max(60, int(span))
+        return self.window_rows(
+            platform,
+            group_id,
+            center - reach,
+            center + reach + 1,
+            limit=max(1, int(limit)),
+        )
 
     def prune_interactions(self, *, retention_days: int = 30) -> int:
         """按天清理互动计数。"""

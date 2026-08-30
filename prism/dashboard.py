@@ -63,7 +63,7 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "hint": "jpeg 体积小；png 无损、文字边缘最锐利但文件更大。",
     },
     "render.image_quality": {"label": "图片质量", "hint": "仅 jpeg 生效，越高越清晰也越大。"},
-    "render.show_evidence": {"label": "展示原话证据", "hint": "关闭后卡片不再引用群友原话。"},
+    "render.show_evidence": {"label": "展示聊天现场证供", "hint": "关闭后卡片不再还原群友的对话气泡。"},
     "render.show_avatar": {"label": "展示头像", "hint": "关闭后只显示昵称首字。"},
     "render.footer_note": {"label": "卡片署名", "hint": "显示在卡片右下角。"},
     "render.font_family": {
@@ -108,8 +108,8 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "hint": "不清空的话新人格会带着旧人格的记忆说话，容易串味。",
     },
     "love.enabled": {
-        "label": "启用恋爱成分",
-        "hint": "关掉后「棱镜恋爱」「棱镜恋爱榜」以及兼容指令「今日人设」全部停用。",
+        "label": "启用恋爱诊断",
+        "hint": "关掉后「恋爱诊断」「恋爱诊断榜」以及兼容别名「棱镜恋爱」「今日人设」全部停用。",
     },
     "love.min_messages": {
         "label": "最少发言条数",
@@ -131,22 +131,22 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "显示昨日趋势",
         "hint": "在卡片上标注比昨天升温还是降温。趋势只是提示，不参与计分。",
     },
-    "love.leaderboard_size": {"label": "排行榜人数", "hint": "「棱镜恋爱榜」列出前几名。"},
+    "love.leaderboard_size": {"label": "排行榜人数", "hint": "「恋爱诊断榜」列出前几名。"},
     "love.notice_collect": {
         "label": "采集互动事件",
         "hint": "记录戳一戳、表情回应、撤回的次数（仅 QQ 有效）。关掉后这三项恒为 0。",
     },
     "love.theme": {
         "label": "恋爱卡主题",
-        "hint": "恋爱成分卡单独用的主题，默认「恋色樱粉」。选「自动挡」就按每张卡的性子临场挑。",
+        "hint": "恋爱诊断卡单独用的主题，默认「恋色樱粉」。选「自动挡」就按每张卡的性子临场挑。",
     },
     "compat.legacy_commands": {
         "label": "启用「画像」系列指令",
         "hint": "画像 / 正画像 / 负画像 / 克隆人格 / 找对象 / 查看画像 / 切换人格 / 恢复人格。与上游插件同名，同时装两个请关掉一边。",
     },
     "compat.love_commands": {
-        "label": "启用「今日人设」指令",
-        "hint": "恋爱成分的上游同名指令。与 astrbot_plugin_love_formula 同名，同时装两个请关掉一边。",
+        "label": "启用旧指令别名",
+        "hint": "控制「今日人设」（上游同名）与「棱镜恋爱」「棱镜恋爱榜」（本插件旧名）。与 astrbot_plugin_love_formula 同时装请关掉一边。",
     },
     "behavior.quiet_progress": {
         "label": "静默模式",
@@ -169,7 +169,7 @@ GROUP_TITLES: dict[str, dict[str, str]] = {
     "privacy": {"label": "隐私", "icon": "shield"},
     "inject": {"label": "对话注入", "icon": "chat"},
     "persona_clone": {"label": "人格克隆", "icon": "mask"},
-    "love": {"label": "恋爱成分", "icon": "heart"},
+    "love": {"label": "恋爱诊断", "icon": "heart"},
     "behavior": {"label": "行为", "icon": "sliders"},
     "compat": {"label": "上游兼容", "icon": "link"},
 }

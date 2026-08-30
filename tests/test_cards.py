@@ -13,6 +13,8 @@ from astrbot_plugin_persona_prism.prism.models import (
     Portrait,
     Section,
     Tag,
+    Term,
+    Utterance,
 )
 
 
@@ -236,8 +238,63 @@ def test_build_card_html_hides_avatar_when_disabled():
 def test_build_card_html_adds_small_sample_note():
     small = cards.build_card_html(_portrait(), _ctx(sample_size=12))
     large = cards.build_card_html(_portrait(), _ctx(sample_size=240))
-    assert 'class="note"' in small
-    assert 'class="note"' not in large
+    assert 'class="notes"' in small
+    assert 'class="notes"' not in large
+
+
+def test_build_card_html_notes_sit_below_footer():
+    html_out = cards.build_card_html(_portrait(), _ctx(sample_size=8))
+    assert html_out.index('class="foot"') < html_out.index('class="notes"')
+
+
+def test_build_card_html_renders_sample_note_from_portrait():
+    portrait = _portrait()
+    portrait.sample_note = "口径：近 7 天，共 42 句"
+    html_out = cards.build_card_html(portrait, _ctx(sample_size=240))
+    assert "口径：近 7 天，共 42 句" in html_out
+
+
+def test_build_card_html_renders_evidence_as_chat_scene():
+    portrait = _portrait(
+        evidence=[
+            Evidence(
+                quote="我来修",
+                reason="主动接活",
+                title="23:11 · 深夜救火",
+                dialogue=[
+                    Utterance(speaker="阿光", text="这段代码崩了"),
+                    Utterance(speaker="[本人]", text="我来修", mine=True),
+                ],
+            ),
+        ],
+    )
+    html_out = cards.build_card_html(portrait, _ctx())
+    assert cards.EVIDENCE_STYLE[cards.DEFAULT_THEME]["title"] in html_out
+    assert "原话证据" not in html_out
+    assert 'class="cbub"' in html_out
+    assert 'class="crow right"' in html_out
+    assert 'class="crow left"' in html_out
+    assert "阿光" in html_out
+    assert "23:11 · 深夜救火" in html_out
+    assert "主动接活" in html_out
+
+
+def test_build_card_html_evidence_title_follows_theme():
+    for theme, style in cards.EVIDENCE_STYLE.items():
+        html_out = cards.build_card_html(_portrait(), _ctx(theme=theme))
+        assert style["title"] in html_out
+
+
+def test_build_card_html_renders_equation_and_glossary():
+    portrait = _portrait()
+    portrait.equation = "L = (V + N) - (I + S) + 200"
+    portrait.glossary = [Term(name="纯爱值", code="S", brief="含糖量", detail="越高越腻")]
+    html_out = cards.build_card_html(portrait, _ctx())
+    assert "演化算式" in html_out
+    assert "L = (V + N) - (I + S) + 200" in html_out
+    assert "术语速查" in html_out
+    assert "纯爱值" in html_out
+    assert "越高越腻" in html_out
 
 
 def test_build_card_html_falls_back_to_raw_block_when_unstructured():

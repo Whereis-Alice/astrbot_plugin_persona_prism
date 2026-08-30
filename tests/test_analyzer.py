@@ -173,9 +173,9 @@ def test_build_portrait_discounts_and_notes_small_sample() -> None:
         min_messages=20,
     )
     assert portrait.confidence < 0.9
-    assert [s.title for s in portrait.sections] == ["样本说明"]
-    assert "8 条" in portrait.sections[0].body
-    assert "60 条" in portrait.sections[0].body
+    assert portrait.sections == []
+    assert "8 条" in portrait.sample_note
+    assert "60 条" in portrait.sample_note
 
 
 def test_build_portrait_keeps_sections_intact_for_large_sample() -> None:
@@ -186,6 +186,7 @@ def test_build_portrait_keeps_sections_intact_for_large_sample() -> None:
         min_messages=20,
     )
     assert [s.title for s in portrait.sections] == ["风格"]
+    assert portrait.sample_note == ""
     assert portrait.confidence == pytest.approx(0.9)
 
 

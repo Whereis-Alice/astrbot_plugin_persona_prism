@@ -106,6 +106,19 @@ def test_clean_rows_can_keep_commands():
     assert collector.clean_rows(rows) == []
 
 
+def test_clean_rows_keeps_media_only_messages_when_asked():
+    """被动采集要留纯图/超短消息：它们是恋爱诊断的互动证据，扔了就等于没采到。"""
+    rows = [
+        {"message_id": "1", "user_id": "1", "text": "", "ts": 10, "images": 1},
+        {"message_id": "2", "user_id": "1", "text": "嗯", "ts": 20, "images": 2},
+        {"message_id": "3", "user_id": "1", "text": "。。。", "ts": 30},
+    ]
+    assert collector.clean_rows(rows) == []
+    kept = collector.clean_rows(rows, keep_media=True)
+    assert [m.message_id for m in kept] == ["1", "2"]
+    assert kept[0].images == 1
+
+
 def test_clean_rows_carries_reply_flag_and_name():
     cleaned = collector.clean_rows(
         [

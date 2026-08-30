@@ -94,7 +94,7 @@ const KIND_FILTERS = [
   { value: "roast", label: "群友锐评" },
   { value: "clone", label: "人格克隆" },
   { value: "match", label: "群友姻缘" },
-  { value: "love", label: "恋爱成分" },
+  { value: "love", label: "恋爱诊断" },
 ];
 
 const state = {
@@ -1263,15 +1263,62 @@ function renderDrawer() {
     body.appendChild(block);
   }
 
+  if (payload.equation) {
+    const block = make("div", "block");
+    block.appendChild(make("p", "block__title", "演化算式"));
+    block.appendChild(make("pre", "equation", payload.equation));
+    body.appendChild(block);
+  }
+
   if ((payload.evidence || []).length) {
     const block = make("div", "block");
-    block.appendChild(make("p", "block__title", "原话证据"));
+    block.appendChild(make("p", "block__title", "呈堂证供"));
     for (const item of payload.evidence) {
-      const box = make("div", "quote");
-      const quote = make("blockquote", "", item.quote);
-      append(box, [quote, item.reason ? make("cite", "", item.reason) : null]);
+      const box = make("div", "evidence");
+      if (item.title) box.appendChild(make("p", "evidence__title", item.title));
+      const lines = (item.dialogue || []).filter((line) => line && line.text);
+      if (lines.length) {
+        // 有还原出来的现场就画成聊天气泡，没有才退回单行引用。
+        const chat = make("div", "chat");
+        for (const line of lines) {
+          const row = make("div", line.mine ? "crow crow--mine" : "crow");
+          append(row, [
+            make("span", "cava", (line.speaker || "?").slice(0, 1)),
+            (() => {
+              const wrap = make("div", "cbody");
+              append(wrap, [
+                make("span", "cname", line.speaker || ""),
+                make("span", "cbub", line.text),
+              ]);
+              return wrap;
+            })(),
+          ]);
+          chat.appendChild(row);
+        }
+        box.appendChild(chat);
+      } else if (item.quote) {
+        box.appendChild(make("blockquote", "", item.quote));
+      }
+      if (item.reason) box.appendChild(make("cite", "", item.reason));
       block.appendChild(box);
     }
+    body.appendChild(block);
+  }
+
+  if ((payload.glossary || []).length) {
+    const block = make("div", "block");
+    block.appendChild(make("p", "block__title", "术语速查"));
+    const list = make("div", "terms");
+    for (const term of payload.glossary) {
+      const box = make("div", "term");
+      append(box, [
+        make("p", "term__head", term.code ? term.name + " · " + term.code : term.name),
+        term.brief ? make("p", "term__brief", term.brief) : null,
+        term.detail ? make("p", "term__detail", term.detail) : null,
+      ]);
+      list.appendChild(box);
+    }
+    block.appendChild(list);
     body.appendChild(block);
   }
 
@@ -1283,6 +1330,14 @@ function renderDrawer() {
       list.appendChild(make("li", "", line));
     }
     block.appendChild(list);
+    body.appendChild(block);
+  }
+
+  if (payload.sample_note) {
+    // 样本说明按用户要求压在最底部：它是脚注，不该抢正文的位置。
+    const block = make("div", "block");
+    block.appendChild(make("p", "block__title", "样本说明"));
+    block.appendChild(make("p", "field__hint", payload.sample_note));
     body.appendChild(block);
   }
 

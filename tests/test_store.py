@@ -99,6 +99,20 @@ def test_add_messages_refreshes_only_non_empty_user_name(store: PrismStore) -> N
     assert store.latest_user_name(PLATFORM, GROUP, USER) == "爱乃"
 
 
+def test_add_messages_backfills_missing_timestamp(store: PrismStore) -> None:
+    store.add_messages(PLATFORM, GROUP, [_msg("1", ts=0)])
+    store.add_messages(PLATFORM, GROUP, [_msg("1", ts=1700000123)])
+    rows = store.fetch_user_corpus(PLATFORM, GROUP, USER, limit=5)
+    assert rows[0]["ts"] == 1700000123
+
+
+def test_add_messages_never_overwrites_good_timestamp(store: PrismStore) -> None:
+    store.add_messages(PLATFORM, GROUP, [_msg("1", ts=1700000000)])
+    store.add_messages(PLATFORM, GROUP, [_msg("1", ts=0)])
+    rows = store.fetch_user_corpus(PLATFORM, GROUP, USER, limit=5)
+    assert rows[0]["ts"] == 1700000000
+
+
 def test_same_message_id_in_other_group_is_kept(store: PrismStore) -> None:
     store.add_messages(PLATFORM, GROUP, [_msg("1")])
     assert store.add_messages(PLATFORM, "800", [_msg("1")]) == 1

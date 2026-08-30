@@ -25,7 +25,7 @@ EXPECTED_BUILTIN = {
     "roast": ("棱镜锐评", "群友锐评", True, "card"),
     "clone": ("棱镜克隆", "人格克隆", False, "text"),
     "match": ("棱镜姻缘", "群友姻缘", True, "card"),
-    "love": ("棱镜恋爱", "恋爱成分", True, "card"),
+    "love": ("恋爱诊断", "恋爱诊断", True, "card"),
     # 「画像」系列：兼容上游 astrbot_plugin_portrayal 的长文玩法
     "legacy_portrait": ("画像", "画像·综合", False, "markdown"),
     "legacy_positive": ("正画像", "画像·优势", False, "markdown"),
@@ -261,6 +261,12 @@ def test_user_prompt_embeds_transcript_and_banner() -> None:
 
 
 def test_json_contract_demands_quotable_evidence_and_low_confidence() -> None:
-    assert "禁止改写或虚构" in JSON_CONTRACT
+    assert "禁止改写、润色、翻译或虚构" in JSON_CONTRACT
     assert "confidence" in JSON_CONTRACT
     assert "低于 0.5" in JSON_CONTRACT
+
+
+def test_json_contract_describes_scene_dialogue() -> None:
+    assert "dialogue" in JSON_CONTRACT
+    assert "[本人]" in JSON_CONTRACT
+    assert "前后各 1 句" in JSON_CONTRACT

@@ -27,8 +27,8 @@ def test_plugin_identity_is_renamed_everywhere():
 
 
 def test_own_commands_has_no_duplicates():
-    assert len(main.OWN_COMMANDS) == 30
-    assert len(set(main.OWN_COMMANDS)) == 30
+    assert len(main.OWN_COMMANDS) == 32
+    assert len(set(main.OWN_COMMANDS)) == 32
 
 
 def test_builtin_commands_are_a_subset_of_own_commands():
@@ -47,11 +47,14 @@ def test_builtin_commands_match_the_prompt_library():
 #: astrbot_plugin_love_formula）是特意沿用的上游指令名，不带棱镜前缀。
 COMPAT_COMMANDS = frozenset(main.LEGACY_KEYS) | {"查看画像", "切换人格", "恢复人格", "今日人设"}
 
+#: 恋爱诊断这一支刻意不带棱镜前缀：它是独立玩法，名字要一眼看懂。
+LOVE_COMMANDS = frozenset({"恋爱诊断", "恋爱诊断榜"})
+
 
 def test_every_command_shares_the_prism_prefix():
     # 棱镜系列统一前缀是「不和其他插件抢指令」的关键；只有兼容指令例外。
     for command in main.OWN_COMMANDS:
-        assert command.startswith("棱镜") or command in COMPAT_COMMANDS
+        assert command.startswith("棱镜") or command in COMPAT_COMMANDS or command in LOVE_COMMANDS
 
 
 def test_compat_commands_are_all_registered_as_own():
@@ -224,3 +227,72 @@ def test_dashboard_error_is_a_staticmethod():
         main.PersonaPrismStar.__dict__["_dashboard_error"],
         staticmethod,
     )
+
+
+# ---------------------------------------------------------------------------
+# 恋爱诊断的天数参数与统计窗口
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "expect"),
+    [
+        ("恋爱诊断", 1),
+        ("恋爱诊断 7", 7),
+        ("恋爱诊断 7天", 7),
+        ("恋爱诊断 30 日", 30),
+        ("恋爱诊断 @某人 3", 3),
+        ("恋爱诊断 0", 1),
+        ("恋爱诊断 99", 30),
+        ("恋爱诊断 abc", 1),
+    ],
+)
+def test_parse_days_reads_the_trailing_number(text, expect):
+    assert main._parse_days(text, "恋爱诊断") == expect
+
+
+def test_parse_days_ignores_qq_ids():
+    # 长数字是 QQ 号，不能被当成天数；两者可以同时出现。
+    assert main._parse_days("恋爱诊断 123456789", "恋爱诊断") == 1
+    assert main._parse_days("恋爱诊断 123456789 7", "恋爱诊断") == 7
+    assert main._DIGITS_RE.search("恋爱诊断 123456789 7").group(1) == "123456789"
+
+
+def test_parse_days_respects_custom_default_and_cap():
+    assert main._parse_days("恋爱诊断", "恋爱诊断", default=7) == 7
+    assert main._parse_days("恋爱诊断 20", "恋爱诊断", cap=14) == 14
+
+
+class _WindowStub:
+    """只为调 _love_window 拼的最小壳子：它只用到 config.int_of。"""
+
+    _love_day = main.PersonaPrismStar._love_day
+    _love_window = main.PersonaPrismStar._love_window
+
+    def __init__(self, start_hour: int = 4) -> None:
+        self.config = type("_C", (), {"int_of": staticmethod(lambda key: start_hour)})()
+
+
+def test_love_window_one_day_equals_love_day():
+    stub = _WindowStub()
+    day, start, end = stub._love_day()
+    assert stub._love_window(1) == (day, start, end, 1)
+
+
+def test_love_window_extends_backwards_only():
+    stub = _WindowStub()
+    day, start, end = stub._love_day()
+    assert stub._love_window(7) == (day, start - 6 * 86400, end, 7)
+
+
+@pytest.mark.parametrize(("days", "span"), [(0, 1), (1, 1), (30, 30), (99, 30), (-5, 1)])
+def test_love_window_clamps_span(days, span):
+    stub = _WindowStub()
+    assert stub._love_window(days)[3] == span
+
+
+def test_love_day_start_hour_shifts_the_boundary():
+    early = _WindowStub(0)._love_day()
+    late = _WindowStub(4)._love_day()
+    assert late[1] - early[1] in {4 * 3600, 4 * 3600 - 86400}
+    assert late[2] - late[1] == 86400

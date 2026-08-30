@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 from astrbot_plugin_persona_prism.prism import love
-from astrbot_plugin_persona_prism.prism.models import CorpusMessage, Portrait, Section, Tag
+from astrbot_plugin_persona_prism.prism.models import CorpusMessage, Evidence, Portrait, Section, Tag
 from astrbot_plugin_persona_prism.prism.store import PrismStore
 
 PLATFORM = "aiocqhttp"
@@ -403,8 +403,10 @@ def test_fallback_portrait_is_self_contained() -> None:
     assert [t.label for t in card.tags] == list(metrics.archetype.tags)
     assert card.advice
     titles = [s.title for s in card.sections]
-    assert titles == ["判词", "数据说话", "成分拆解"]
-    assert "阿狸" in card.sections[1].body
+    assert titles == ["判词", "行为诊断", "成分拆解"]
+    assert "阿狸" in card.sections[0].body
+    assert card.equation.startswith("L(")
+    assert [t.code for t in card.glossary] == ["S", "V", "N", "I"]
 
 
 def test_merge_portrait_without_llm_returns_formula_card() -> None:
@@ -463,6 +465,133 @@ def test_metrics_prompt_block_locks_numbers() -> None:
     assert metrics.archetype.label in block
     assert "趋势" in block
 
+
+# -- 窗口口径与现场证供 -----------------------------------------------------
+
+
+def test_span_label_reads_naturally() -> None:
+    assert love.span_label(0) == "当日"
+    assert love.span_label(1) == "当日"
+    assert love.span_label(7) == "近 7 天"
+
+
+def test_compute_metrics_multi_day_uses_daily_average() -> None:
+    one_day = love.compute_metrics(love.LoveInputs(msg_sent=14))
+    seven_days = love.compute_metrics(love.LoveInputs(msg_sent=98), days=7)
+    # 7 天里发 98 条 = 每天 14 条，跟单日 14 条应当同档，不能因为基数大就人人沸腾。
+    assert seven_days.days == 7
+    assert abs(seven_days.simp - one_day.simp) <= 1
+
+
+def test_evolution_equation_shows_the_span_and_result() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=42, reply_received=7), days=7)
+    text = love.evolution_equation(metrics)
+    assert text.startswith("L(近 7 天日均)")
+    assert f"{metrics.total}%" in text
+    assert love.total_label(metrics.total) in text
+
+
+def test_evolution_equation_marks_empty_sample() -> None:
+    metrics = love.compute_metrics(love.LoveInputs())
+    assert "样本为空" in love.evolution_equation(metrics)
+
+
+ME = "1001"
+T0 = 1700000000  # 本地时间落在白天，不会被判成深夜时段
+
+
+def test_build_scenes_wraps_the_quote_with_real_neighbours() -> None:
+    rows = [
+        _row("1", "2002", "你在吗", T0),
+        _row("2", ME, "在的，刚回来", T0 + 5),
+        _row("3", "2003", "带我一个", T0 + 9),
+    ]
+    scenes = love.build_scenes(rows, ME, names={"2002": "阿狸"})
+    assert len(scenes) == 1
+    scene = scenes[0]
+    assert scene.quote == "在的，刚回来"
+    assert [u.text for u in scene.dialogue] == ["你在吗", "在的，刚回来", "带我一个"]
+    assert [u.mine for u in scene.dialogue] == [False, True, False]
+    assert [u.speaker for u in scene.dialogue] == ["阿狸", "U1001", "U2003"]
+    assert scene.title.endswith("日常片段")
+    assert scene.reason
+
+
+def test_build_scenes_labels_reply_and_topic() -> None:
+    reply = love.build_scenes(
+        [_row("1", "2002", "谁去修风车", T0), _row("2", ME, "我去", T0 + 5, reply_to="1")],
+        ME,
+    )
+    assert reply[0].title.endswith("接话现场")
+    topic = love.build_scenes(
+        [_row("1", "2002", "……", T0), _row("2", ME, "话说今晚有流星雨", T0 + 4000)],
+        ME,
+    )
+    assert topic[0].title.endswith("冷场破冰")
+
+
+def test_build_scenes_prefers_flagged_moments() -> None:
+    rows = [
+        _row("1", "2002", "嗯", T0),
+        _row("2", ME, "嗯", T0 + 5),
+        _row("3", "2002", "哦", T0 + 9),
+        _row("4", "2003", "谁来搭把手", T0 + 14),
+        _row("5", ME, "我来", T0 + 18, reply_to="4"),
+        _row("6", "2003", "谢了", T0 + 22),
+    ]
+    scenes = love.build_scenes(rows, ME, limit=1)
+    assert len(scenes) == 1
+    assert scenes[0].quote == "我来"
+
+
+def test_build_scenes_skips_empty_and_symbol_only_lines() -> None:
+    rows = [
+        _row("1", "2002", "在吗", T0),
+        _row("2", ME, "。。。", T0 + 5),
+        _row("3", ME, "", T0 + 9),
+    ]
+    assert love.build_scenes(rows, ME) == []
+
+
+def test_build_scenes_needs_rows_and_a_target() -> None:
+    assert love.build_scenes([], ME) == []
+    assert love.build_scenes([_row("1", ME, "在的", T0)], "") == []
+
+
+def test_build_scenes_respects_limit_and_keeps_order() -> None:
+    rows = []
+    for step in range(6):
+        base = T0 + step * 60
+        rows.append(_row(f"a{step}", "2002", "问题" + str(step), base))
+        rows.append(_row(f"b{step}", ME, "回答" + str(step), base + 5, reply_to=f"a{step}"))
+    scenes = love.build_scenes(rows, ME, limit=3)
+    assert len(scenes) == 3
+    quotes = [s.quote for s in scenes]
+    assert quotes == sorted(quotes, key=lambda q: int(q[-1]))
+
+
+def test_fallback_portrait_carries_scenes_and_sample_note() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=8), days=7)
+    scenes = [Evidence(quote="在的", reason="随手回一句", title="12:00 · 日常片段")]
+    card = love.fallback_portrait(metrics, scenes=scenes, sample_note="取证范围：近 7 天本群 80 条")
+    assert card.evidence[0].quote == "在的"
+    assert card.sample_note.startswith("取证范围")
+
+
+def test_merge_portrait_uses_local_scenes_when_model_gives_none() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=8))
+    scenes = [Evidence(quote="在的", title="12:00 · 日常片段")]
+    llm = Portrait(sections=[Section("判词", "模型的判词")], structured=True)
+    card = love.merge_portrait(metrics, llm, scenes=scenes, sample_note="样本说明")
+    assert [e.quote for e in card.evidence] == ["在的"]
+    assert card.sample_note == "样本说明"
+
+
+def test_merge_portrait_keeps_model_evidence_over_local_scenes() -> None:
+    metrics = love.compute_metrics(love.LoveInputs(msg_sent=8))
+    llm = Portrait(evidence=[Evidence(quote="模型挑的那句")], structured=True)
+    card = love.merge_portrait(metrics, llm, scenes=[Evidence(quote="本地裁的")])
+    assert [e.quote for e in card.evidence] == ["模型挑的那句"]
 
 # -- 持久层 -----------------------------------------------------------------
 

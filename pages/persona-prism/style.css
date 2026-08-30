@@ -1475,6 +1475,145 @@ textarea {
   font-style: normal;
 }
 
+/* 呈堂证供：把还原出来的现场画成聊天气泡，和卡片上的观感保持一致。 */
+.evidence {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  background: var(--surface-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.evidence__title {
+  font-size: var(--step--1);
+  font-weight: 650;
+  color: var(--text-2);
+  letter-spacing: 0.04em;
+}
+
+.evidence blockquote {
+  margin: 0;
+  font-size: var(--step-0);
+  line-height: 1.65;
+}
+
+.evidence cite {
+  font-size: var(--step--2);
+  color: var(--text-3);
+  font-style: normal;
+  line-height: 1.6;
+}
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.crow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.crow--mine {
+  flex-direction: row-reverse;
+}
+
+.cava {
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: var(--step--2);
+  font-weight: 700;
+  color: var(--text-1);
+  background: var(--surface-3, var(--surface-2));
+  border: 1px solid var(--border);
+}
+
+.cbody {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: min(78%, 520px);
+}
+
+.crow--mine .cbody {
+  align-items: flex-end;
+}
+
+.cname {
+  font-size: var(--step--2);
+  color: var(--text-3);
+}
+
+.cbub {
+  padding: 7px 11px;
+  border-radius: 12px;
+  background: var(--surface-1, #fff);
+  border: 1px solid var(--border);
+  font-size: var(--step--1);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.crow--mine .cbub {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.equation {
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--step--1);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-2);
+}
+
+.terms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: var(--space-2);
+}
+
+.term {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.term__head {
+  font-size: var(--step--1);
+  font-weight: 650;
+}
+
+.term__brief {
+  margin-top: 3px;
+  font-size: var(--step--2);
+  color: var(--text-2);
+}
+
+.term__detail {
+  margin-top: 3px;
+  font-size: var(--step--2);
+  color: var(--text-3);
+  line-height: 1.6;
+}
+
 .advice {
   margin: 0;
   padding-left: 20px;

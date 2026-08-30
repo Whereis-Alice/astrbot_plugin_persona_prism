@@ -191,9 +191,100 @@ class Section:
 
 
 @dataclass(slots=True)
+class Utterance:
+    """证供气泡里的一句话。"""
+
+    speaker: str = ""
+    text: str = ""
+    mine: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"speaker": self.speaker, "text": self.text, "mine": self.mine}
+
+
+@dataclass(slots=True)
+class Term:
+    """术语速查条目（恋爱诊断等玩法用）。"""
+
+    name: str = ""
+    code: str = ""
+    brief: str = ""
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "code": self.code, "brief": self.brief, "detail": self.detail}
+
+
+#: 语料里代表"被画像者本人"的占位说话人。
+SELF_SPEAKER = "[本人]"
+
+
+def _parse_dialogue(raw: Any) -> list[Utterance]:
+    """把 LLM/落库的 dialogue 字段解析成气泡序列，容忍字符串形态。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[Utterance] = []
+    for item in raw:
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                continue
+            speaker = ""
+            for sep in ("：", ":"):
+                if sep in text[:24]:
+                    speaker, _, text = text.partition(sep)
+                    break
+            speaker = speaker.strip()
+            text = text.strip()
+            if not text:
+                continue
+            out.append(
+                Utterance(
+                    speaker=speaker,
+                    text=text,
+                    mine=speaker in {SELF_SPEAKER, "本人", "我"},
+                ),
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("content") or "").strip()
+        if not text:
+            continue
+        speaker = str(item.get("speaker") or item.get("name") or "").strip()
+        mine = bool(item.get("mine")) or speaker in {SELF_SPEAKER, "本人", "我"}
+        out.append(Utterance(speaker=speaker, text=text, mine=mine))
+    return out
+
+
+@dataclass(slots=True)
 class Evidence:
-    quote: str
+    """一条证供：场景小标题 + 说明 + 现场对话气泡。"""
+
+    quote: str = ""
     reason: str = ""
+    title: str = ""
+    dialogue: list[Utterance] = field(default_factory=list)
+
+    def scene_lines(self, speaker_name: str = "") -> list[Utterance]:
+        """拿到用于渲染气泡的对话序列；没有 dialogue 时用 quote 合成一条。"""
+        if self.dialogue:
+            out: list[Utterance] = []
+            for line in self.dialogue:
+                text = (line.text or "").strip()
+                if not text:
+                    continue
+                name = (line.speaker or "").strip()
+                mine = line.mine or name in {SELF_SPEAKER, "本人", "我"}
+                if mine:
+                    name = speaker_name or SELF_SPEAKER
+                out.append(Utterance(speaker=name, text=text, mine=mine))
+            if out:
+                return out
+        quote = (self.quote or "").strip()
+        if not quote:
+            return []
+        return [Utterance(speaker=speaker_name or SELF_SPEAKER, text=quote, mine=True)]
 
 
 @dataclass(slots=True)
@@ -207,6 +298,9 @@ class Portrait:
     sections: list[Section] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
     advice: list[str] = field(default_factory=list)
+    equation: str = ""
+    glossary: list[Term] = field(default_factory=list)
+    sample_note: str = ""
     confidence: float = 0.0
     raw_text: str = ""
     structured: bool = True
@@ -218,8 +312,19 @@ class Portrait:
             "tags": [{"label": t.label, "polarity": t.polarity} for t in self.tags],
             "dimensions": [{"name": d.name, "score": d.score, "note": d.note} for d in self.dimensions],
             "sections": [{"title": s.title, "body": s.body} for s in self.sections],
-            "evidence": [{"quote": e.quote, "reason": e.reason} for e in self.evidence],
+            "evidence": [
+                {
+                    "quote": e.quote,
+                    "reason": e.reason,
+                    "title": e.title,
+                    "dialogue": [u.to_dict() for u in e.dialogue],
+                }
+                for e in self.evidence
+            ],
             "advice": list(self.advice),
+            "equation": self.equation,
+            "glossary": [t.to_dict() for t in self.glossary],
+            "sample_note": self.sample_note,
             "confidence": round(self.confidence, 3),
             "structured": self.structured,
             "raw_text": self.raw_text,
@@ -250,11 +355,28 @@ class Portrait:
                 if isinstance(s, dict) and (s.get("title") or s.get("body"))
             ],
             evidence=[
-                Evidence(str(e.get("quote") or ""), str(e.get("reason") or ""))
+                Evidence(
+                    quote=str(e.get("quote") or ""),
+                    reason=str(e.get("reason") or ""),
+                    title=str(e.get("title") or ""),
+                    dialogue=_parse_dialogue(e.get("dialogue")),
+                )
                 for e in data.get("evidence") or []
-                if isinstance(e, dict) and e.get("quote")
+                if isinstance(e, dict) and (e.get("quote") or e.get("dialogue"))
             ],
             advice=[str(a) for a in data.get("advice") or [] if str(a).strip()],
+            equation=str(data.get("equation") or ""),
+            glossary=[
+                Term(
+                    name=str(t.get("name") or ""),
+                    code=str(t.get("code") or ""),
+                    brief=str(t.get("brief") or ""),
+                    detail=str(t.get("detail") or ""),
+                )
+                for t in data.get("glossary") or []
+                if isinstance(t, dict) and t.get("name")
+            ],
+            sample_note=str(data.get("sample_note") or ""),
             confidence=float(data.get("confidence") or 0.0),
             raw_text=str(data.get("raw_text") or ""),
             structured=bool(data.get("structured", True)),
@@ -281,11 +403,27 @@ class Portrait:
             lines.append("")
             lines.append(f"【{section.title}】")
             lines.append(section.body.strip())
+        if self.equation:
+            lines.append("")
+            lines.append("【演化算式】")
+            lines.append(self.equation.strip())
         if self.evidence:
             lines.append("")
-            lines.append("【原话依据】")
+            lines.append("【现场证供】")
             for item in self.evidence:
-                lines.append(f"· 「{item.quote}」 {item.reason}".rstrip())
+                if item.title:
+                    lines.append(f"· {item.title}")
+                for line in item.scene_lines():
+                    who = line.speaker or (SELF_SPEAKER if line.mine else "群友")
+                    lines.append(f"    {who}：{line.text}")
+                if item.reason:
+                    lines.append(f"    —— {item.reason}")
+        if self.glossary:
+            lines.append("")
+            lines.append("【术语速查】")
+            for term in self.glossary:
+                code = f"({term.code}) " if term.code else ""
+                lines.append(f"· {code}{term.name}：{term.brief}".rstrip())
         if self.advice:
             lines.append("")
             lines.append("【建议】")
@@ -293,6 +431,8 @@ class Portrait:
                 lines.append(f"· {item}")
         lines.append("")
         lines.append(f"置信度 {self.confidence:.0%}")
+        if self.sample_note:
+            lines.append(self.sample_note.strip())
         return "\n".join(lines)
 
 

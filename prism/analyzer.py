@@ -17,7 +17,7 @@ import json
 import re
 from typing import Any
 
-from .models import CorpusBundle, MemberProfile, Portrait, Section
+from .models import CorpusBundle, MemberProfile, Portrait
 from .prompts import PromptSpec, build_system_prompt, build_user_prompt
 
 #: 需要把「和谁互动过」喂给模型的玩法。姻缘/综合画像/红娘都要看社交痕迹。
@@ -130,12 +130,12 @@ def build_portrait(
     portrait.confidence = clamp_confidence(portrait.confidence) or 0.6
     penalty = sample_penalty(bundle.stats.sampled, min_messages)
     portrait.confidence = round(portrait.confidence * penalty, 3)
-    if penalty < 1.0:
-        note = (
+    if penalty < 1.0 and not portrait.sample_note:
+        # 样本说明不再插进正文（会打断阅读），改成挂在卡片最底部的小字。
+        portrait.sample_note = (
             f"本次仅采集到 {bundle.stats.sampled} 条有效发言"
             f"（建议至少 {max(1, min_messages) * 3} 条），结论仅供参考。"
         )
-        portrait.sections.append(Section("样本说明", note))
     return portrait
 
 
