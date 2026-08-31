@@ -343,11 +343,14 @@ def build_overview(
     prompt_count: int = 0,
     version: str = "",
     backend_hint: str = "",
+    repo: str = "",
 ) -> dict[str, Any]:
     data = store.overview()
     return {
         "ok": True,
         "version": version,
+        # 面板的 GitHub 链接由后端下发：前端资源里不允许出现外站地址。
+        "repo": repo,
         "server_time": int(time.time()),
         "stats": data,
         "render": {
@@ -360,6 +363,7 @@ def build_overview(
             "theme_label": theme_label(config.str_of("render.theme")),
             "last_backend": backend_hint,
             "backend_labels": BACKEND_LABELS,
+            "card_themes": len(THEMES),
         },
         "prompts": {"total": prompt_count},
         "flags": {

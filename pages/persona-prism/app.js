@@ -22,6 +22,8 @@ const REQUEST_TIMEOUT_MS = 20000;
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const THEME_KEY = "persona-prism-theme";
+const DENSITY_KEY = "persona-prism-density";
+const TREE_KEY = "persona-prism-tree";
 
 /** 提示词输出布局的兜底文案；正常情况下后端会在 /prompts 里下发 layouts。 */
 const FALLBACK_LAYOUTS = [
@@ -80,11 +82,40 @@ const THEME_OPTIONS = [
   },
 ];
 
+const DENSITY_OPTIONS = [
+  { value: "cozy", title: "舒适", hint: "留白充足，适合大屏慢看" },
+  { value: "compact", title: "紧凑", hint: "压缩留白，一屏塞更多内容" },
+];
+
 const VIEWS = [
-  { id: "overview", label: "概览", icon: "i-overview", kicker: "OVERVIEW / 运行状态" },
-  { id: "records", label: "画像记录", icon: "i-records", kicker: "RECORDS / 按群与用户归档" },
-  { id: "settings", label: "运行设置", icon: "i-sliders", kicker: "SETTINGS / 配置与隐私" },
-  { id: "prompts", label: "提示词", icon: "i-prompt", kicker: "PROMPTS / 模板管理" },
+  {
+    id: "overview",
+    label: "概览",
+    icon: "i-overview",
+    kicker: "OVERVIEW",
+    desc: "插件此刻的运行状态：出图链路、任务成败、语料积累，一屏看完。",
+  },
+  {
+    id: "records",
+    label: "画像记录",
+    icon: "i-records",
+    kicker: "RECORDS",
+    desc: "生成过的画像按群聊和群友归档，点开任意一条能看原卡片与完整正文。",
+  },
+  {
+    id: "settings",
+    label: "运行设置",
+    icon: "i-sliders",
+    kicker: "SETTINGS",
+    desc: "采集范围、出图方式、隐私与配额都在这里改，保存后立即生效。",
+  },
+  {
+    id: "prompts",
+    label: "提示词",
+    icon: "i-prompt",
+    kicker: "PROMPTS",
+    desc: "每套玩法的提示词都能改写，也可以新增只属于你这台机器的玩法。",
+  },
 ];
 
 const KIND_FILTERS = [
@@ -95,11 +126,18 @@ const KIND_FILTERS = [
   { value: "clone", label: "人格克隆" },
   { value: "match", label: "群友姻缘" },
   { value: "love", label: "恋爱诊断" },
+  { value: "legacy_portrait", label: "画像·综合" },
+  { value: "legacy_positive", label: "画像·优势" },
+  { value: "legacy_negative", label: "画像·缺点" },
+  { value: "legacy_clone", label: "画像·人格克隆" },
+  { value: "legacy_match", label: "画像·红娘" },
 ];
 
 const state = {
   view: "overview",
   theme: "auto",
+  density: "cozy",
+  treeOpen: false,
   booted: false,
   bootFailed: false,
   eventsBound: false,
@@ -268,7 +306,46 @@ function applyTheme(mode, persist) {
   if (dom.themeLabel) {
     dom.themeLabel.textContent = option.label.split(" ")[0];
   }
+  if (dom.themeSwatch) {
+    dom.themeSwatch.style.background = option.swatch;
+  }
   renderThemeMenu();
+}
+
+/* 信息密度：只改 :root[data-density]，尺度令牌在 CSS 里换一档，不动任何布局代码。 */
+function applyDensity(mode, persist) {
+  const option = DENSITY_OPTIONS.find((item) => item.value === mode) || DENSITY_OPTIONS[0];
+  state.density = option.value;
+  document.documentElement.dataset.density = option.value;
+  if (persist) {
+    try {
+      window.localStorage.setItem(DENSITY_KEY, option.value);
+    } catch (err) {
+      /* 隐私模式下 localStorage 可能不可写，忽略即可 */
+    }
+  }
+  if (dom.densityLabel) {
+    dom.densityLabel.textContent = option.title;
+  }
+  if (dom.density) {
+    dom.density.title = option.hint + "（点击切换）";
+  }
+}
+
+function toggleDensity() {
+  const index = DENSITY_OPTIONS.findIndex((item) => item.value === state.density);
+  const next = DENSITY_OPTIONS[(index + 1) % DENSITY_OPTIONS.length];
+  applyDensity(next.value, true);
+}
+
+/* 群聊目录的展开状态也记在本地：一台机器上的使用习惯基本是固定的。 */
+function setTreeOpen(open) {
+  state.treeOpen = Boolean(open);
+  try {
+    window.localStorage.setItem(TREE_KEY, state.treeOpen ? "open" : "closed");
+  } catch (err) {
+    /* 同上，写不进去不影响本次会话 */
+  }
 }
 
 function renderThemeMenu() {
@@ -580,7 +657,7 @@ function renderOverview(root) {
     const bars = make("div", "bars");
     kinds.forEach((item, index) => {
       bars.appendChild(
-        barRow(kindLabel(item.kind), Number(item.total || 0), max, "var(--chart-" + ((index % 5) + 1) + ")"),
+        barRow(item.label || kindLabel(item.kind), Number(item.total || 0), max, "var(--chart-" + ((index % 5) + 1) + ")"),
       );
     });
     dist.body.appendChild(bars);
@@ -673,7 +750,18 @@ function scopeLabel() {
 }
 
 function renderTree() {
-  const box = panel("群聊目录", "先选群，再选群友", "i-users");
+  const box = panel("群聊目录", "先选群，再选群友", "i-users", [
+    button("", {
+      variant: "ghost",
+      small: true,
+      icon: "i-close",
+      title: "收起目录",
+      onClick: () => {
+        setTreeOpen(false);
+        render();
+      },
+    }),
+  ]);
   box.body.className = "panel__body panel__body--flush tree";
   const tree = state.tree;
   if (!tree) {
@@ -746,6 +834,8 @@ function renderTree() {
           state.filters.groupId = group.group_id;
           state.filters.userId = member.user_id;
           state.records.page = 1;
+          /* 选定具体群友后目录就没用了，顺手收起把整幅宽度让给记录列表。 */
+          setTreeOpen(false);
           void loadRecords();
         });
         members.appendChild(item);
@@ -770,20 +860,25 @@ function splitSceneTitle(title, lines) {
   return { title: text, clock: (own && own.clock) || (any && any.clock) || "" };
 }
 
-//: 气泡头像。拿得到 QQ 号就直接拉真头像，失败或没有号就退回首字母色块。
-function avatarNode(line) {
-  const speaker = String((line && line.speaker) || "?");
-  const box = make("span", "cava", speaker.slice(0, 1) || "?");
-  const uid = String((line && line.user_id) || "").trim();
-  if (/^\d{5,12}$/.test(uid)) {
+//: 头像块。拿得到 QQ 号就直接拉真头像，失败或没有号就退回首字母色块。
+//: 气泡和记录行共用这一个出口，外链因此只出现一次。
+function avatarBox(uid, seed, cls) {
+  const label = String(seed || "?").trim() || "?";
+  const box = make("span", cls || "cava", label.slice(0, 1));
+  const id = String(uid || "").trim();
+  if (/^\d{5,12}$/.test(id)) {
     const img = document.createElement("img");
     img.alt = "";
     img.loading = "lazy";
-    img.src = "https://q.qlogo.cn/headimg_dl?dst_uin=" + uid + "&spec=100&img_type=jpg";
+    img.src = "https://q.qlogo.cn/headimg_dl?dst_uin=" + id + "&spec=100&img_type=jpg";
     img.addEventListener("error", () => img.remove());
     box.appendChild(img);
   }
   return box;
+}
+
+function avatarNode(line) {
+  return avatarBox(line && line.user_id, (line && line.speaker) || "?", "cava");
 }
 
 //: 头衔铭牌。头衔形如「纯爱战神（反讽）」，括注单独降一号字。
@@ -810,10 +905,12 @@ function recordCard(item) {
 
   const top = make("div", "record__top");
   const who = make("div", "record__who");
-  append(who, [
+  const ident = make("div", "record__ident");
+  append(ident, [
     make("span", "record__name", item.user_name),
     make("span", "record__id", "#" + item.user_id),
   ]);
+  append(who, [avatarBox(item.user_id, item.user_name, "recava"), ident]);
   const meta = make("div", "record__meta");
   append(meta, [
     pill(item.kind_label, "pill--accent"),
@@ -859,7 +956,14 @@ function recordCard(item) {
 
 function renderRecords(root) {
   const layout = make("div", "records");
-  layout.appendChild(renderTree());
+  layout.dataset.tree = state.treeOpen ? "open" : "closed";
+
+  /* 目录只在展开时占位，收起后整幅宽度都留给记录列表。 */
+  if (state.treeOpen) {
+    const col = make("aside", "treecol");
+    col.appendChild(renderTree());
+    layout.appendChild(col);
+  }
 
   const search = make("div", "searchbox");
   const input = make("input", "input");
@@ -887,9 +991,42 @@ function renderRecords(root) {
     void loadRecords();
   });
 
-  const tools = [search, kindSelect];
-  if (state.filters.groupId || state.filters.userId) {
-    tools.push(
+  const scoped = Boolean(state.filters.groupId || state.filters.userId);
+
+  /* 范围条：目录开关 + 当前范围 + 搜索筛选，独立成一行，收起目录后依然能换范围。 */
+  const bar = make("div", "scopebar");
+  bar.appendChild(
+    button(state.treeOpen ? "收起目录" : "群聊目录", {
+      variant: state.treeOpen ? "primary" : "ghost",
+      small: true,
+      icon: "i-users",
+      title: state.treeOpen ? "把目录收起来，腾出记录列表的宽度" : "展开群聊目录，按群和群友挑记录",
+      onClick: () => {
+        setTreeOpen(!state.treeOpen);
+        render();
+      },
+    }),
+  );
+  const chip = make("span", "scopechip");
+  append(chip, [icon(scoped ? "i-user" : "i-database", 13), make("span", "", scopeLabel())]);
+  if (scoped) {
+    const reset = make("button", "scopechip__x", "×");
+    reset.type = "button";
+    reset.title = "回到全部记录";
+    reset.addEventListener("click", () => {
+      state.filters.groupId = "";
+      state.filters.userId = "";
+      state.records.page = 1;
+      void loadRecords();
+    });
+    chip.appendChild(reset);
+  }
+  bar.appendChild(chip);
+
+  const barTools = make("div", "scopebar__tools");
+  append(barTools, [search, kindSelect]);
+  if (scoped) {
+    barTools.appendChild(
       button("清空当前范围", {
         variant: "danger",
         small: true,
@@ -898,8 +1035,9 @@ function renderRecords(root) {
       }),
     );
   }
+  bar.appendChild(barTools);
 
-  const list = panel("画像记录", scopeLabel() + " · 共 " + fmtNum(state.records.total) + " 条", "i-records", tools);
+  const list = panel("画像记录", scopeLabel() + " · 共 " + fmtNum(state.records.total) + " 条", "i-records");
   list.body.className = "panel__body panel__body--flush";
 
   if (state.busy && !state.records.items.length) {
@@ -944,7 +1082,9 @@ function renderRecords(root) {
     list.body.appendChild(pager);
   }
 
-  layout.appendChild(list);
+  const mainCol = make("div", "recordsmain");
+  append(mainCol, [bar, list]);
+  layout.appendChild(mainCol);
   root.appendChild(layout);
 }
 
@@ -2234,14 +2374,14 @@ function navBadge(viewId) {
 function renderNav() {
   clear(dom.nav);
   for (const view of VIEWS) {
-    const btn = make("button", "navitem");
+    const btn = make("button", "tab");
     btn.type = "button";
-    btn.title = view.label;
+    btn.title = view.desc || view.label;
     btn.setAttribute("aria-current", view.id === state.view ? "true" : "false");
-    append(btn, [icon(view.icon, 18), make("span", "", view.label)]);
+    append(btn, [icon(view.icon, 17), make("span", "tab__text", view.label)]);
     const badge = navBadge(view.id);
     if (badge) {
-      btn.appendChild(make("span", "navitem__badge", badge));
+      btn.appendChild(make("span", "tab__badge", badge));
     }
     btn.addEventListener("click", () => {
       switchView(view.id);
@@ -2250,15 +2390,122 @@ function renderNav() {
   }
 }
 
+/* ------------------------------------------------------------ 横幅与状态条 */
+
+//: 横幅右侧的数值徽章：等宽数字 + 一行说明，鼠标悬停给完整解释。
+function heroStat(value, label, hint) {
+  const box = make("span", "herostat");
+  append(box, [make("strong", "herostat__num", value), make("span", "herostat__label", label)]);
+  if (hint) {
+    box.title = hint;
+  }
+  return box;
+}
+
+//: 每个视图顶部的横幅。左侧是身份与这一页在做什么，右侧是全局数值。
+function renderHero(view) {
+  const data = state.overview || {};
+  const stats = data.stats || {};
+  const corpus = stats.corpus || {};
+  const render = data.render || {};
+
+  const box = make("section", "hero");
+  const main = make("div", "hero__main");
+
+  const lead = make("div", "hero__lead");
+  append(lead, [
+    make("span", "slug", "ASTRBOT_PLUGIN_PERSONA_PRISM"),
+    make("h1", "hero__title", view.label),
+    view.desc ? make("p", "hero__desc", view.desc) : null,
+  ]);
+  main.appendChild(lead);
+
+  const chips = make("div", "hero__chips");
+  append(chips, [
+    render.theme_label ? pill("默认卡片主题 " + render.theme_label, "pill--soft") : null,
+    render.card_themes ? pill(fmtNum(render.card_themes) + " 套卡片主题", "pill--soft") : null,
+    (data.prompts || {}).total ? pill(fmtNum(data.prompts.total) + " 套提示词", "pill--soft") : null,
+    render.backend_label ? pill("出图 " + render.backend_label, "pill--soft") : null,
+  ]);
+  if (data.repo) {
+    const link = make("a", "btn btn--ghost btn--sm");
+    link.href = data.repo;
+    link.target = "_blank";
+    link.rel = "noreferrer noopener";
+    append(link, [icon("i-link", 14), make("span", "", "GitHub")]);
+    chips.appendChild(link);
+  }
+  if (chips.childElementCount) {
+    main.appendChild(chips);
+  }
+
+  const statBox = make("div", "hero__stats");
+  append(statBox, [
+    heroStat(fmtNum(stats.portraits), "份画像", "累计生成并归档的画像"),
+    heroStat(fmtNum(stats.groups), "个群聊", "至少生成过一次画像的群"),
+    heroStat(fmtNum(stats.users), "位群友", "被画过像的不同群友"),
+    heroStat(fmtNum(corpus.total), "条语料", "本地留存的发言样本"),
+  ]);
+
+  append(box, [main, statBox]);
+  return box;
+}
+
+//: 底部状态条。左侧是运行摘要，右侧是当前所在位置。
+function renderStatusBar() {
+  if (!dom.statusRun || !dom.statusCrumb) {
+    return;
+  }
+  const data = state.overview || {};
+  const stats = data.stats || {};
+  const corpus = stats.corpus || {};
+  const render = data.render || {};
+
+  clear(dom.statusRun);
+  if (!state.overview) {
+    dom.statusRun.appendChild(make("span", "", "正在连接控制台…"));
+  } else {
+    const parts = [
+      "画像 " + fmtNum(stats.portraits),
+      "群聊 " + fmtNum(stats.groups),
+      "群友 " + fmtNum(stats.users),
+      "语料 " + fmtNum(corpus.total) + " 条",
+      "今日 " + fmtNum(stats.today),
+    ];
+    if (render.backend_label) {
+      parts.push("出图 " + render.backend_label);
+    }
+    parts.forEach((text, index) => {
+      if (index) {
+        dom.statusRun.appendChild(make("span", "statusbar__dot", "·"));
+      }
+      dom.statusRun.appendChild(make("span", "", text));
+    });
+  }
+
+  clear(dom.statusCrumb);
+  const view = VIEWS.find((item) => item.id === state.view) || VIEWS[0];
+  const crumbs = [make("span", "", "人格棱镜"), make("span", "statusbar__now", view.label)];
+  if (data.server_time) {
+    crumbs.push(make("span", "", "数据截至 " + fmtTime(data.server_time)));
+  }
+  crumbs.forEach((node, index) => {
+    if (index) {
+      dom.statusCrumb.appendChild(make("span", "statusbar__dot", "·"));
+    }
+    dom.statusCrumb.appendChild(node);
+  });
+}
+
 function render() {
   if (state.bootFailed) {
     return;
   }
   const view = VIEWS.find((item) => item.id === state.view) || VIEWS[0];
-  dom.viewTitle.textContent = view.label;
-  dom.viewKicker.textContent = view.kicker;
+  document.title = view.label + " · 人格棱镜";
   clear(dom.main);
   const root = make("div", "view");
+  root.appendChild(renderHero(view));
   if (state.view === "records") {
     renderRecords(root);
   } else if (state.view === "settings") {
@@ -2270,6 +2517,7 @@ function render() {
   }
   dom.main.appendChild(root);
   renderNav();
+  renderStatusBar();
   refreshSaveBar();
 }
 
@@ -2355,6 +2603,10 @@ function bindEvents() {
   dom.themeToggle.addEventListener("click", (event) => {
     event.stopPropagation();
     toggleThemeMenu();
+  });
+
+  dom.density.addEventListener("click", () => {
+    toggleDensity();
   });
 
   document.addEventListener("click", (event) => {
@@ -2463,11 +2715,14 @@ function haltWithBootFailure(reason) {
 function cacheDom() {
   dom.nav = document.getElementById("nav");
   dom.main = document.getElementById("main");
-  dom.viewTitle = document.getElementById("view-title");
-  dom.viewKicker = document.getElementById("view-kicker");
   dom.themeToggle = document.getElementById("theme-toggle");
   dom.themeMenu = document.getElementById("theme-menu");
   dom.themeLabel = document.getElementById("theme-label");
+  dom.themeSwatch = document.getElementById("theme-swatch");
+  dom.density = document.getElementById("density");
+  dom.densityLabel = document.getElementById("density-label");
+  dom.statusRun = document.getElementById("status-run");
+  dom.statusCrumb = document.getElementById("status-crumb");
   dom.refresh = document.getElementById("refresh");
   dom.scrim = document.getElementById("scrim");
   dom.drawer = document.getElementById("drawer");
@@ -2485,15 +2740,39 @@ function readStoredTheme() {
   return THEME_OPTIONS.some((item) => item.value === stored) ? stored : "auto";
 }
 
+function readStoredDensity() {
+  let stored = "";
+  try {
+    stored = window.localStorage.getItem(DENSITY_KEY) || "";
+  } catch (err) {
+    stored = "";
+  }
+  return DENSITY_OPTIONS.some((item) => item.value === stored) ? stored : "cozy";
+}
+
+/* 群聊目录默认收起：记录列表才是这一页的主角，目录按需滑出。 */
+function readStoredTree() {
+  let stored = "";
+  try {
+    stored = window.localStorage.getItem(TREE_KEY) || "";
+  } catch (err) {
+    stored = "";
+  }
+  return stored === "open";
+}
+
 async function boot() {
   state.bootFailed = false;
   cacheDom();
   applyTheme(readStoredTheme(), false);
+  applyDensity(readStoredDensity(), false);
+  state.treeOpen = readStoredTree();
 
   // 先确认桥接可用再渲染任何视图：否则各视图的取数会一起报错刷 toast。
   clear(dom.main);
   dom.main.appendChild(loadingState("正在连接 AstrBot 控制台…"));
   renderNav();
+  renderStatusBar();
 
   const link = await waitForBridge(BRIDGE_WAIT_MS);
   if (!link) {

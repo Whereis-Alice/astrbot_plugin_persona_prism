@@ -1,7 +1,7 @@
 name: astrbot_plugin_persona_prism
 display_name: 人格棱镜
 desc: 把群聊记录折射成人格画像。本地语料库 + 带对话上下文的结构化 LLM 分析 + 十套高级卡片主题（画像 6 + 恋爱专属 4） + WebUI 记录管理与隐私开关；另有可指定天数的「恋爱诊断」玩法，并兼容 astrbot_plugin_portrayal 的「画像」系列指令与 astrbot_plugin_love_formula 的「今日人设」。
-version: v1.4.1
+version: v1.5.0
 author: Whereis-Alice
 repo: https://github.com/Whereis-Alice/astrbot_plugin_persona_prism
 astrbot_version: ">=4.16,<5"

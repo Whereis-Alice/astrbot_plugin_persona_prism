@@ -430,3 +430,59 @@ def test_metadata_declares_the_new_identity():
     for field in ("name", "repo", "display_name", "author"):
         for word in UPSTREAM_WORDS:
             assert word not in str(meta[field]).lower(), f"{field}: {word}"
+
+# ---------------------------------------------------------------------------
+# 面板外壳：顶栏 + 横向 Tab + 横幅 + 状态条 + 可收纳目录
+# ---------------------------------------------------------------------------
+
+
+def test_shell_uses_appbar_tabbar_and_statusbar():
+    """外壳三件套必须同时存在于 HTML 与 CSS，少一半会渲染成裸文本。"""
+    for cls in ("appbar", "tabbar", "statusbar"):
+        assert f'class="{cls}"' in INDEX_HTML, cls
+        assert f".{cls} {{" in STYLE_CSS, cls
+    # 旧的左栏 + 顶栏结构不能残留，否则两套布局会互相打架。
+    for dead in (".rail", ".navitem", ".topbar", ".shell"):
+        assert f"{dead} {{" not in STYLE_CSS, dead
+        assert dead.lstrip(".") not in INDEX_HTML, dead
+
+
+def test_hero_pieces_have_styles():
+    """横幅是每页的标题区，类名对不上会塌成没有留白的一坨。"""
+    for cls in ("hero", "hero__main", "hero__lead", "slug", "hero__title", "hero__stats", "herostat"):
+        assert f'"{cls}"' in APP_JS, cls
+        assert f".{cls} {{" in STYLE_CSS, cls
+    # 横幅 chip 用的轻量胶囊变体。
+    assert "pill--soft" in APP_JS
+    assert ".pill--soft {" in STYLE_CSS
+
+
+def test_density_switch_has_both_gears():
+    """信息密度只覆盖尺度令牌，紧凑挡必须在 CSS 里真的定义过。"""
+    assert 'dataset.density' in APP_JS
+    assert ':root[data-density="compact"]' in STYLE_CSS
+    for gear in ("cozy", "compact"):
+        assert f'value: "{gear}"' in APP_JS, gear
+
+
+def test_record_tree_can_collapse():
+    """群聊目录默认收起，展开时才让出左列；两个状态都要有样式。"""
+    assert 'layout.dataset.tree' in APP_JS
+    assert ".records {" in STYLE_CSS
+    assert '.records[data-tree="open"] {' in STYLE_CSS
+    for cls in ("treecol", "recordsmain", "scopebar", "scopechip"):
+        assert f'"{cls}"' in APP_JS, cls
+        assert f".{cls} {{" in STYLE_CSS, cls
+
+
+def test_github_link_comes_from_the_backend():
+    """前端资源里不许出现外站地址，仓库链接只能由 overview 接口下发。"""
+    assert '"repo": repo' in DASHBOARD_SRC
+    assert "repo=PLUGIN_REPO" in MAIN_SRC
+    assert "data.repo" in APP_JS
+
+
+def test_hero_theme_count_comes_from_the_card_theme_table():
+    """横幅上的「N 套卡片主题」要跟真实主题表联动，不能写死。"""
+    assert '"card_themes": len(THEMES)' in DASHBOARD_SRC
+    assert "render.card_themes" in APP_JS

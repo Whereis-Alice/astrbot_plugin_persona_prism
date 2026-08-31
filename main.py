@@ -49,7 +49,8 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.4.1"
+PLUGIN_VERSION = "v1.5.0"
+PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_persona_prism"
 
 #: 插件自己刷出去的固定文案特征。协议端常把机器人发出去的消息当群消息回灌，
 #: 这些提示 / 兜底长文不是聊天语料，混进库里会让机器人的画像变成"插件说明书"。
@@ -3239,6 +3240,7 @@ class PersonaPrismStar(Star):
                 prompt_count=len(self.library.all_specs()),
                 version=PLUGIN_VERSION,
                 backend_hint=self._last_backend,
+                repo=PLUGIN_REPO,
             ),
         )
 

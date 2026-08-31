@@ -37,8 +37,10 @@
   --radius-xl: 28px;
   --radius-pill: 999px;
 
-  --rail-width: 208px;
-  --topbar-height: 68px;
+  --appbar-height: 64px;
+  --tabbar-height: 48px;
+  --chrome-height: calc(var(--appbar-height) + var(--tabbar-height));
+  --tree-width: 288px;
   --drawer-width: 480px;
 
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -55,6 +57,30 @@
   font-size: var(--step-0);
   line-height: 1.5;
   -webkit-text-size-adjust: 100%;
+}
+
+/* 信息密度：紧凑挡把留白收一档、字号降半档，一屏能多看几条记录。
+   只覆盖尺度令牌，颜色与结构完全复用，所以四套主题都自动跟随。 */
+:root[data-density="compact"] {
+  --step--2: 0.65rem;
+  --step--1: 0.75rem;
+  --step-0: 0.8125rem;
+  --step-1: 0.9375rem;
+  --step-2: 1.0625rem;
+  --step-3: 1.3125rem;
+  --step-4: 1.75rem;
+  --step-5: 2.25rem;
+
+  --space-3: 10px;
+  --space-4: 12px;
+  --space-5: 15px;
+  --space-6: 18px;
+  --space-7: 24px;
+  --space-8: 32px;
+
+  --appbar-height: 54px;
+  --tabbar-height: 42px;
+  --radius-lg: 16px;
 }
 
 /* --- 2. 夜曜 Nocturne（默认深色） ---------------------------------------- */
@@ -281,25 +307,28 @@ textarea {
 }
 
 .app {
-  display: grid;
-  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   /* 控制台把页面放进 iframe，宽度必须显式撑满，否则窄内容会让右侧露出画布底色。 */
   width: 100%;
   min-width: 0;
   min-height: 100vh;
 }
 
-/* --- 7. 左侧导航 ---------------------------------------------------------- */
-.rail {
+/* --- 7. 顶栏 AppBar ------------------------------------------------------- */
+/* 参考控制台面板的版式：一条常驻顶栏放身份与全局动作，导航另起一行做横向 Tab。
+   顶栏与 Tab 条都 sticky，滚记录列表时导航始终在手边。 */
+.appbar {
   position: sticky;
   top: 0;
-  align-self: start;
-  height: 100vh;
+  z-index: 24;
   display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  padding: var(--space-5) var(--space-4);
-  border-right: 1px solid var(--border);
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  min-height: var(--appbar-height);
+  padding: var(--space-2) var(--space-6);
+  border-bottom: 1px solid var(--border);
   background: var(--surface);
   backdrop-filter: blur(var(--panel-blur));
 }
@@ -308,13 +337,15 @@ textarea {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  min-width: 0;
 }
 
 .brand__mark {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
+  width: 38px;
+  height: 38px;
+  flex: none;
   border-radius: var(--radius-sm);
   background: var(--accent-line);
   color: var(--on-accent);
@@ -324,87 +355,128 @@ textarea {
 .brand__text {
   display: flex;
   flex-direction: column;
-  line-height: 1.15;
+  gap: 2px;
+  line-height: 1.2;
   min-width: 0;
 }
 
 .brand__text strong {
   font-size: var(--step-1);
+  font-weight: 650;
   letter-spacing: 0.02em;
 }
 
 .brand__text small {
   font-size: var(--step--2);
   color: var(--text-3);
-  letter-spacing: 0.16em;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.rail__nav {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-  flex: 1;
-}
-
-.navitem {
+.appbar__actions {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: 10px var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  gap: var(--space-2);
+  flex: none;
+}
+
+/* 主题按钮左侧的小色块，直接把当前配色摆出来，不用读文字。 */
+.swatch {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong);
+  background: var(--accent-line);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.btn__caret {
+  color: var(--text-3);
+  transform: rotate(90deg);
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+#theme-toggle[aria-expanded="true"] .btn__caret {
+  transform: rotate(-90deg);
+}
+
+/* --- 8. Tab 导航 / 横幅 / 状态条 ------------------------------------------ */
+.tabbar {
+  position: sticky;
+  top: var(--appbar-height);
+  z-index: 22;
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-1);
+  min-height: var(--tabbar-height);
+  padding: 0 var(--space-6);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  backdrop-filter: blur(var(--panel-blur));
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabbar::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: 0 var(--space-3);
+  border: none;
   background: none;
-  color: var(--text-2);
+  color: var(--text-3);
   cursor: pointer;
-  text-align: left;
-  transition: background var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out),
-    border-color var(--dur-2) var(--ease-out);
+  white-space: nowrap;
+  transition: color var(--dur-2) var(--ease-out);
 }
 
-.navitem:hover {
+.tab:hover {
+  color: var(--text);
+}
+
+.tab[aria-current="true"] {
+  color: var(--text);
+}
+
+.tab[aria-current="true"] .tab__text {
+  font-weight: 650;
+}
+
+/* 当前项用一条与顶栏同宽的下划线标记，比整块底色更轻。 */
+.tab[aria-current="true"]::after {
+  content: "";
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--accent-line);
+}
+
+.tab__badge {
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
   background: var(--surface-2);
-  color: var(--text);
-}
-
-.navitem[aria-current="true"] {
-  background: var(--accent-soft);
-  border-color: var(--border-strong);
-  color: var(--text);
-  font-weight: 600;
-}
-
-.navitem__badge {
-  margin-left: auto;
+  border: 1px solid var(--border);
   font-size: var(--step--2);
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
 }
 
-.rail__foot {
-  display: flex;
-  justify-content: center;
-}
-
-/* --- 8. 顶栏 -------------------------------------------------------------- */
-.shell {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  min-height: var(--topbar-height);
-  padding: var(--space-3) var(--space-6);
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  backdrop-filter: blur(var(--panel-blur));
+.tab[aria-current="true"] .tab__badge {
+  background: var(--accent-soft);
+  border-color: var(--border-strong);
+  color: var(--text-2);
 }
 
 .kicker {
@@ -414,16 +486,139 @@ textarea {
   color: var(--text-3);
 }
 
-.topbar h1 {
-  font-size: var(--step-2);
-  font-weight: 650;
-  letter-spacing: 0.01em;
+/* 横幅：左侧说清这一页在做什么，右侧一排全局数值。 */
+.hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-6);
+  flex-wrap: wrap;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  backdrop-filter: blur(var(--panel-blur));
 }
 
-.topbar__actions {
+.hero__main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  flex: 1 1 380px;
+}
+
+.hero__lead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.slug {
+  align-self: flex-start;
+  padding: 3px 9px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--step--2);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-2);
+}
+
+.hero__title {
+  font-size: var(--step-3);
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+}
+
+.hero__desc {
+  font-size: var(--step-0);
+  color: var(--text-2);
+  max-width: 62ch;
+}
+
+.hero__chips {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.hero__stats {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.herostat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 82px;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.herostat__num {
+  font-family: var(--font-mono);
+  font-size: var(--step-2);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.herostat__label {
+  font-size: var(--step--2);
+  color: var(--text-3);
+  letter-spacing: 0.04em;
+}
+
+/* 底部状态条：左边一行运行摘要，右边显示当前所在的页。 */
+.statusbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 18;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-6);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  backdrop-filter: blur(var(--panel-blur));
+  font-size: var(--step--2);
+  color: var(--text-3);
+}
+
+.statusbar__run,
+.statusbar__crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.statusbar__crumb {
+  justify-content: flex-end;
+}
+
+.statusbar__dot {
+  color: var(--text-3);
+  opacity: 0.55;
+}
+
+.statusbar__now {
+  color: var(--text);
+  font-weight: 600;
 }
 
 /* --- 9. 按钮与表单元件 --------------------------------------------------- */
@@ -440,6 +635,11 @@ textarea {
   white-space: nowrap;
   transition: transform var(--dur-1) var(--ease-out), background var(--dur-2) var(--ease-out),
     border-color var(--dur-2) var(--ease-out), opacity var(--dur-2) var(--ease-out);
+}
+
+a.btn {
+  text-decoration: none;
+  color: var(--text);
 }
 
 .btn:hover {
@@ -886,6 +1086,13 @@ textarea {
   color: var(--danger);
 }
 
+/* 横幅 chip 用的轻量变体：只有一层淡底，不抢标题的注意力。 */
+.pill--soft {
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--text-2);
+}
+
 .pill--muted {
   color: var(--text-3);
 }
@@ -1137,17 +1344,99 @@ textarea {
 }
 
 /* --- 14. 记录页布局 ------------------------------------------------------- */
+/* 记录页：目录默认收起，只有展开时才让出左边那一列。 */
 .records {
   display: grid;
-  grid-template-columns: minmax(230px, 296px) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-5);
   align-items: start;
+}
+
+.records[data-tree="open"] {
+  grid-template-columns: minmax(240px, var(--tree-width)) minmax(0, 1fr);
+}
+
+.treecol {
+  position: sticky;
+  top: calc(var(--chrome-height) + var(--space-4));
+  min-width: 0;
+  animation: slidein var(--dur-3) var(--ease-out);
+}
+
+@keyframes slidein {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+}
+
+.recordsmain {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* 范围条：目录开关 + 当前范围 + 搜索筛选，目录收起后照样能换范围。 */
+.scopebar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  backdrop-filter: blur(var(--panel-blur));
+}
+
+.scopebar__tools {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.scopechip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  border: 1px solid var(--border-strong);
+  font-size: var(--step--1);
+  color: var(--text);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.scopechip .icon {
+  color: var(--accent);
+}
+
+.scopechip__x {
+  margin-left: 2px;
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: var(--text-3);
+  font-size: var(--step-0);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.scopechip__x:hover {
+  color: var(--text);
 }
 
 .tree {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - var(--topbar-height) - var(--space-8) - 90px);
+  max-height: calc(100vh - var(--chrome-height) - var(--space-8) - 64px);
   overflow: auto;
 }
 
@@ -1289,6 +1578,38 @@ textarea {
 }
 
 .record__who {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* 记录行的群友头像：拉不到真头像就退回首字母色块。 */
+.recava {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: var(--step-0);
+  font-weight: 700;
+  color: var(--text-2);
+  background: var(--accent-line);
+  border: 1px solid var(--border);
+  position: relative;
+  overflow: hidden;
+}
+
+.recava img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.record__ident {
   display: flex;
   align-items: baseline;
   gap: 6px;
@@ -2232,8 +2553,13 @@ body.is-lightbox {
 
 /* --- 23. 响应式 ----------------------------------------------------------- */
 @media (max-width: 1080px) {
-  .records {
+  /* 窄屏放不下两列，目录退成记录列表上方的一块，仍可正常收起。 */
+  .records[data-tree="open"] {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .treecol {
+    position: static;
   }
 
   .tree {
@@ -2242,35 +2568,37 @@ body.is-lightbox {
 }
 
 @media (max-width: 860px) {
-  :root {
-    --rail-width: 64px;
+  .appbar,
+  .statusbar {
+    padding: var(--space-2) var(--space-4);
   }
 
-  .app {
-    grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  .tabbar {
+    padding: 0 var(--space-4);
   }
 
-  .brand__text,
-  .navitem span,
-  .navitem__badge {
+  .brand__text small {
     display: none;
   }
 
-  .rail {
-    align-items: center;
-    padding: var(--space-4) var(--space-2);
+  .hero {
+    padding: var(--space-4);
   }
 
-  .navitem {
-    justify-content: center;
+  .hero__stats {
+    width: 100%;
+  }
+
+  .herostat {
+    flex: 1 1 84px;
+  }
+
+  .statusbar__crumb {
+    display: none;
   }
 
   .main {
     padding: var(--space-4);
-  }
-
-  .topbar {
-    padding: var(--space-3) var(--space-4);
   }
 }
 

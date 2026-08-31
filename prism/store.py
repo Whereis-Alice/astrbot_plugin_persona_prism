@@ -1061,9 +1061,15 @@ class PrismStore:
     def overview(self) -> dict[str, Any]:
         day_start = _now() - 86400
         kinds = [
-            {"kind": row["kind"], "total": int(row["n"])}
+            # 顺手带上落库时的中文名，面板不必等提示词接口回来才能显示玩法名。
+            {
+                "kind": row["kind"],
+                "label": str(row["label"] or "").strip() or row["kind"],
+                "total": int(row["n"]),
+            }
             for row in self._query(
-                "SELECT kind, COUNT(*) AS n FROM portraits GROUP BY kind ORDER BY n DESC",
+                "SELECT kind, MAX(kind_label) AS label, COUNT(*) AS n "
+                "FROM portraits GROUP BY kind ORDER BY n DESC",
             )
         ]
         runs = self._query(
