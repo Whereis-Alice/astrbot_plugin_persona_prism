@@ -549,6 +549,18 @@
       }
     }
   },
+  "match": {
+    "description": "棱镜姻缘",
+    "type": "object",
+    "items": {
+      "rank_size": {
+        "description": "缘分榜上榜人数",
+        "type": "int",
+        "default": 4,
+        "hint": "「棱镜姻缘」卡片顶部那张缘分榜显示几个人。第 1 名是最佳搭子，会占一整块大版面；其余的排在下面当备选。名单与匹配度由本地互动次数算出（谁接了 TA 的话、TA 主动找过谁、两人有没有同场聊过），模型只负责把它写成人话，改不了名字和分数。"
+      }
+    }
+  },
   "profile": {
     "description": "人格徽章",
     "type": "object",

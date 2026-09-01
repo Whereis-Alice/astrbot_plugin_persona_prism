@@ -57,6 +57,12 @@ TURN_LINE_CAP = 9
 #: 群聊不是一问一答，用时间口径比「下一条是不是别人说的」贴近真实体感。
 RESPONSE_WINDOW_SECONDS = 5 * 60
 
+#: 「同场共聊」的取样半径：TA 那条消息前后各看这么多条。
+NEARBY_SPAN = 3
+
+#: 「同场共聊」的时间窗：超过这个间隔就不算待在同一场里。
+NEARBY_WINDOW_SECONDS = 5 * 60
+
 #: 锚点等级。数字越小越优先展开：真实对话边 > 连续发言 > 孤零零一句。
 TIER_EDGE = 0
 TIER_RUN = 1
@@ -120,6 +126,35 @@ def order_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 @dataclass(slots=True)
+class SocialLink:
+    """TA 与某一个人之间的往来计数。缘分榜靠它排名，不靠模型猜。
+
+    三个口径分开记：TA 主动找对方（回复 / @）、对方回应 TA、以及两人只是同场
+    出现过。前两个是硬证据，最后一个是弱信号 —— 很多协议端根本不上报引用关系，
+    没有它的话整张缘分榜会空掉。
+    """
+
+    user_id: str = ""
+    name: str = ""
+    #: TA 主动回复 / @ 对方的次数
+    mine: int = 0
+    #: 对方回复 / @ TA 的次数
+    theirs: int = 0
+    #: 两人同场（同一小段时间里都开口）的次数
+    nearby: int = 0
+
+    @property
+    def mutual(self) -> bool:
+        return self.mine > 0 and self.theirs > 0
+
+    @property
+    def weight(self) -> float:
+        """排名权重。双向往来最值钱，单向次之，同场出现只作兜底。"""
+        pair = min(self.mine, self.theirs)
+        return (self.mine + self.theirs) * 3.0 + pair * 4.0 + self.nearby * 0.5
+
+
+@dataclass(slots=True)
 class SocialSignals:
     """从对话结构里数出来的「关系层」事实。全部是本地精确计数。"""
 
@@ -143,6 +178,8 @@ class SocialSignals:
     answered: int = 0
     #: TA 说完话后，窗口内迟迟没人出声的次数
     unanswered: int = 0
+    #: 与 TA 有往来的人，按权重倒序。缘分榜与"最佳搭子"模块的数据源。
+    links: list[SocialLink] = field(default_factory=list)
 
     @property
     def answer_rate(self) -> float:
@@ -215,6 +252,21 @@ def social_signals(
     sig = SocialSignals()
     responders: dict[str, int] = {}
     addressed: dict[str, int] = {}
+    links: dict[str, SocialLink] = {}
+
+    def link_of(uid: str, name: str = "") -> SocialLink | None:
+        """拿到（或建出）与某人的往来记录。目标本人和没有 uid 的行都跳过。"""
+        key = str(uid or "")
+        if not key or key == target:
+            return None
+        link = links.get(key)
+        if link is None:
+            link = SocialLink(user_id=key, name=(name or nick.get(key, "") or key))
+            links[key] = link
+        elif not link.name or link.name == key:
+            link.name = name or nick.get(key, "") or key
+        return link
+
     for row in ordered:
         uid = str(row.get("user_id") or "")
         sig.total += 1
@@ -228,22 +280,55 @@ def social_signals(
                 addressed[nick.get(parent, "") or parent] = (
                     addressed.get(nick.get(parent, "") or parent, 0) + 1
                 )
+                link = link_of(parent)
+                if link is not None:
+                    link.mine += 1
             for at_id in ats:
                 if at_id and at_id != target:
                     sig.at_others += 1
                     addressed[nick.get(at_id, "") or at_id] = (
                         addressed.get(nick.get(at_id, "") or at_id, 0) + 1
                     )
+                    link = link_of(at_id)
+                    if link is not None:
+                        link.mine += 1
             continue
         who = _name_of(row, nick)
         if reply_to and owner.get(reply_to, "") == target:
             sig.got_replies += 1
             responders[who] = responders.get(who, 0) + 1
+            link = link_of(uid, who)
+            if link is not None:
+                link.theirs += 1
         if target and target in ats:
             sig.got_at += 1
             responders[who] = responders.get(who, 0) + 1
+            link = link_of(uid, who)
+            if link is not None:
+                link.theirs += 1
     sig.responders = sorted(responders.items(), key=lambda kv: (-kv[1], kv[0]))
     sig.addressed = sorted(addressed.items(), key=lambda kv: (-kv[1], kv[0]))
+    #: 同场共聊：TA 开口前后一小段时间里还有谁在说话。协议端不报引用关系时，
+    #: 这是唯一还能看出"跟谁待在一起"的线索，所以权重压得很低但不能不要。
+    for index, row in enumerate(ordered):
+        if str(row.get("user_id") or "") != target or not target:
+            continue
+        ts = int(row.get("ts") or 0)
+        lo = max(0, index - NEARBY_SPAN)
+        hi = min(len(ordered), index + NEARBY_SPAN + 1)
+        seen: set[str] = set()
+        for other in ordered[lo:hi]:
+            ouid = str(other.get("user_id") or "")
+            if not ouid or ouid == target or ouid in seen:
+                continue
+            ots = int(other.get("ts") or 0)
+            if ts and ots and abs(ots - ts) > NEARBY_WINDOW_SECONDS:
+                continue
+            seen.add(ouid)
+            link = link_of(ouid, _name_of(other, nick))
+            if link is not None:
+                link.nearby += 1
+    sig.links = sorted(links.values(), key=lambda link: (-link.weight, link.name))
     # 时间口径的「有人接话吗」：只在 TA 一段连续发言的最后一句结算，
     # 免得刷屏 5 条被算成 5 次；窗口最末一句不判定，那是取样边界不是冷场。
     people = list(ordered)

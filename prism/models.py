@@ -228,6 +228,32 @@ class Term:
         return {"name": self.name, "code": self.code, "brief": self.brief, "detail": self.detail}
 
 
+@dataclass(slots=True)
+class Pairing:
+    """缘分榜上的一个人：谁、多少分、凭什么算出来的。
+
+    分数与理由都由本地互动统计算出（谁接了 TA 的话、TA 找过谁、有没有同场聊过），
+    模型只负责把它写成人话 —— 所以卡片上那个"最佳搭子"不是编的。
+    """
+
+    name: str = ""
+    user_id: str = ""
+    score: int = 0
+    #: 一句人话理由，面向玩家（例如"一来一回聊了 12 轮"）。
+    note: str = ""
+    #: 是否双向：TA 找过对方、对方也接过 TA 的话。
+    mutual: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "user_id": self.user_id,
+            "score": self.score,
+            "note": self.note,
+            "mutual": self.mutual,
+        }
+
+
 #: 语料里代表"被画像者本人"的占位说话人。
 SELF_SPEAKER = "[本人]"
 
@@ -337,6 +363,8 @@ class Portrait:
     advice: list[str] = field(default_factory=list)
     equation: str = ""
     glossary: list[Term] = field(default_factory=list)
+    #: 缘分榜（棱镜姻缘专属）。本地互动统计算出的排名，卡片直接照它渲染。
+    pairings: list[Pairing] = field(default_factory=list)
     sample_note: str = ""
     #: 模型自评的 16 型人格代码（四个大写字母）。空串表示没给或关了这个开关。
     type_code: str = ""
@@ -369,6 +397,7 @@ class Portrait:
             "advice": list(self.advice),
             "equation": self.equation,
             "glossary": [t.to_dict() for t in self.glossary],
+            "pairings": [p.to_dict() for p in self.pairings],
             "sample_note": self.sample_note,
             "confidence": round(self.confidence, 3),
             "structured": self.structured,
@@ -423,6 +452,17 @@ class Portrait:
                 for t in data.get("glossary") or []
                 if isinstance(t, dict) and t.get("name")
             ],
+            pairings=[
+                Pairing(
+                    name=str(p.get("name") or ""),
+                    user_id=str(p.get("user_id") or ""),
+                    score=int(p.get("score") or 0),
+                    note=str(p.get("note") or ""),
+                    mutual=bool(p.get("mutual")),
+                )
+                for p in data.get("pairings") or []
+                if isinstance(p, dict) and p.get("name")
+            ],
             sample_note=str(data.get("sample_note") or ""),
             type_code=str(data.get("type_code") or ""),
             persona=str(data.get("persona") or ""),
@@ -445,6 +485,9 @@ class Portrait:
         if self.tags:
             lines.append("")
             lines.append("标签：" + " / ".join(t.label for t in self.tags))
+        if self.pairings:
+            lines.append("")
+            lines.append("缘分榜：" + " / ".join(f"{p.name} {p.score}%" for p in self.pairings))
         if self.dimensions:
             lines.append("")
             for dim in self.dimensions:

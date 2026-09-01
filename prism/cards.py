@@ -1469,6 +1469,67 @@ _EVIDENCE_CSS = """
   display: flex; flex-direction: column; gap: 6px;
   font-size: 14px; line-height: 1.65; color: var(--ink-mute);
 }
+/* ---- 缘分榜（棱镜姻缘专属版式）---------------------------------------- */
+.panel-pair { position: relative; overflow: hidden; }
+.panel-pair::after {
+  content: ""; position: absolute; right: -60px; top: -70px;
+  width: 220px; height: 220px; border-radius: 50%;
+  background: radial-gradient(circle, var(--accent-soft), transparent 68%);
+  opacity: .3; pointer-events: none;
+}
+.pair-top {
+  position: relative; z-index: 1;
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  padding: 6px 4px 2px;
+}
+.pair-who {
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  width: 132px; flex: 0 0 132px; text-align: center;
+}
+.pair-who b {
+  font-family: var(--font-title); font-size: 19px; line-height: 1.3;
+  color: var(--ink-strong); word-break: break-word;
+}
+.pava {
+  position: relative; display: block; overflow: hidden;
+  width: 74px; height: 74px; border-radius: var(--avatar-radius);
+  border: var(--avatar-border);
+  font-size: 30px; font-weight: 700; color: #fff;
+}
+.pava .ini { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.pava img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.pair-knot { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; gap: 7px; }
+.pair-glyph { font-size: 26px; line-height: 1; color: var(--accent-ink); }
+.pair-score {
+  font-family: var(--font-title); font-size: 46px; line-height: 1;
+  color: var(--ink-strong); letter-spacing: -1px;
+}
+.pair-score em { font-size: 21px; font-style: normal; color: var(--accent-ink); margin-left: 2px; }
+.pair-track {
+  position: relative; display: block; width: 100%; max-width: 300px; height: 9px;
+  border-radius: 99px; background: var(--bar-bg); overflow: hidden;
+}
+.pair-track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; background: var(--bar-fill); }
+.pair-flag {
+  padding: 3px 12px; border-radius: 99px; font-size: 14.5px;
+  background: var(--chip-bg); border: var(--chip-border); color: var(--ink-dim);
+}
+.pair-note {
+  position: relative; z-index: 1;
+  margin-top: 12px; text-align: center; font-size: 15.5px; color: var(--ink-mute);
+}
+.pair-rest { position: relative; z-index: 1; margin-top: 16px; border-top: 1px solid var(--rule); padding-top: 14px; }
+.pair-rest-cap { font-size: 14.5px; color: var(--ink-mute); margin-bottom: 10px; }
+.pr-row { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
+.pr-row .pava { width: 40px; height: 40px; font-size: 17px; border-width: 1px; }
+.pr-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pr-line { display: flex; align-items: baseline; gap: 9px; min-width: 0; }
+.pr-line b { font-size: 17px; color: var(--ink-strong); }
+.pr-note { font-size: 14px; color: var(--ink-mute); }
+.pr-bar { position: relative; display: block; height: 7px; border-radius: 99px; background: var(--bar-bg); overflow: hidden; }
+.pr-bar i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 99px; background: var(--bar-fill); opacity: .82; }
+.pr-score { font-family: var(--font-title); font-size: 20px; color: var(--ink); }
+.pr-score em { font-size: 13px; font-style: normal; color: var(--ink-mute); }
 """
 
 #: Markdown 卡片专用样式（"画像"系列的自由排版输出走这套）。
@@ -1715,9 +1776,10 @@ def _metrics_html(portrait: Portrait) -> str:
         )
     radar_box = f'<div class="radar-box">{radar}</div>' if radar else ""
     solo = "" if radar else " solo"
+    title = _panel_title(portrait.kind, "metrics", "维度评分")
     return (
         '<div class="panel">'
-        '<div class="panel-title">维度评分</div>'
+        f'<div class="panel-title">{_esc(title)}</div>'
         f'<div class="metrics{solo}">{radar_box}'
         f'<div class="dims">{"".join(rows)}</div></div>'
         "</div>"
@@ -1727,6 +1789,8 @@ def _metrics_html(portrait: Portrait) -> str:
 #: 不同玩法的面板标题。恋爱卡叫「画像正文」总归怪，就分开叫。
 _PANEL_TITLES: dict[str, dict[str, str]] = {
     "love": {"sections": "诊断正文", "advice": "恋爱建议"},
+    "match": {"sections": "缘分解读", "advice": "破冰指南", "metrics": "社交侧写"},
+    "legacy_match": {"sections": "缘分解读", "advice": "破冰指南", "metrics": "社交侧写"},
 }
 
 
@@ -1856,6 +1920,84 @@ def _evidence_html(portrait: Portrait, ctx: CardContext) -> str:
         '<div class="panel">'
         f'<div class="panel-title">{_esc(style["title"])}</div>'
         f'<div class="evs">{"".join(blocks)}</div>'
+        "</div>"
+    )
+
+
+def _pair_avatar(name: str, user_id: str, ctx: CardContext, *, mine: bool = False) -> str:
+    """一枚圆头像。取得到真头像就用，取不到退回首字母色块（颜色按昵称稳定生成）。"""
+    label = (name or "").strip() or "群友"
+    inner = f'<span class="ini">{_initial(label, user_id)}</span>'
+    src = ""
+    if ctx.show_avatar:
+        if mine and ctx.avatar_url:
+            src = ctx.avatar_url
+        elif user_id and ctx.avatar_template and "{uid}" in ctx.avatar_template:
+            src = ctx.avatar_template.replace("{uid}", user_id)
+    if src:
+        inner += f'<img src="{_esc(src)}" alt="" onerror="this.style.display=\'none\'"/>'
+    return (
+        f'<span class="pava" style="background:{_speaker_color(label)}">{inner}</span>'
+    )
+
+
+def pairings_panel_html(portrait: Portrait, ctx: CardContext) -> str:
+    """对外暴露缘分榜面板，供 Markdown 版红娘卡复用同一块版式。"""
+    return _pairings_html(portrait, ctx)
+
+
+def _pairings_html(portrait: Portrait, ctx: CardContext) -> str:
+    """缘分榜：把"和谁最搭"直接摊在卡片最前面。
+
+    这一块是棱镜姻缘和人格画像的分水岭 —— 画像讲的是"这个人是谁"，姻缘讲的是
+    "这个人和谁最搭"。名字与匹配度全部来自本地互动计数，模型碰不到。
+    """
+    items = [p for p in portrait.pairings if (p.name or "").strip()]
+    if not items:
+        return ""
+    top = items[0]
+    mine_name = (ctx.target_name or "TA").strip()
+    knot = "\u2764" if top.mutual else "\u2726"
+    rest = ""
+    if len(items) > 1:
+        rows: list[str] = []
+        for item in items[1:4]:
+            width = max(4, min(100, int(item.score)))
+            note = f'<span class="pr-note">{_esc(item.note)}</span>' if item.note else ""
+            rows.append(
+                '<div class="pr-row">'
+                f'{_pair_avatar(item.name, item.user_id, ctx)}'
+                '<span class="pr-body">'
+                f'<span class="pr-line"><b>{_esc(item.name)}</b>{note}</span>'
+                f'<span class="pr-bar"><i style="width:{width}%"></i></span>'
+                "</span>"
+                f'<span class="pr-score">{width}<em>%</em></span>'
+                "</div>",
+            )
+        rest = (
+            '<div class="pair-rest">'
+            '<div class="pair-rest-cap">还有这几位也聊得动</div>'
+            f'{"".join(rows)}'
+            "</div>"
+        )
+    top_score = max(4, min(99, int(top.score)))
+    top_note = f'<div class="pair-note">{_esc(top.note)}</div>' if top.note else ""
+    return (
+        '<div class="panel panel-pair">'
+        '<div class="panel-title">缘分榜</div>'
+        '<div class="pair-top">'
+        f'<div class="pair-who">{_pair_avatar(mine_name, ctx.target_id, ctx, mine=True)}'
+        f'<b>{_esc(mine_name)}</b></div>'
+        '<div class="pair-knot">'
+        f'<span class="pair-glyph">{knot}</span>'
+        f'<span class="pair-score">{top_score}<em>%</em></span>'
+        f'<span class="pair-track"><i style="width:{top_score}%"></i></span>'
+        f'<span class="pair-flag">{"双向奔赴" if top.mutual else "单向靠近"}</span>'
+        "</div>"
+        f'<div class="pair-who">{_pair_avatar(top.name, top.user_id, ctx)}'
+        f'<b>{_esc(top.name)}</b></div>'
+        "</div>"
+        f"{top_note}{rest}"
         "</div>"
     )
 
@@ -2119,6 +2261,7 @@ def build_card_html(portrait: Portrait, ctx: CardContext) -> str:
         body_parts = [
             f'<div class="headline">{_esc(portrait.headline)}</div>' if portrait.headline else "",
             _tags_html(portrait),
+            _pairings_html(portrait, ctx),
             _metrics_html(portrait),
             _equation_html(portrait),
             _sections_html(portrait),
@@ -2352,6 +2495,7 @@ def build_markdown_card_html(
     ctx: CardContext,
     *,
     footer_lines: list[str] | None = None,
+    top_html: str = "",
 ) -> str:
     """把一段 Markdown 正文渲染成与画像卡片同主题的完整 HTML 文档。"""
     theme = normalize_theme(ctx.theme)
@@ -2371,6 +2515,7 @@ def build_markdown_card_html(
     )
     inner = (
         f"{_hero_html(ctx, ctx.title_badge)}"
+        f"{top_html}"
         f'<div class="md-body">{body}</div>'
         f'<div class="foot foot-md"><div class="sign">{sign}</div></div>'
     )
@@ -2934,6 +3079,7 @@ class CardRenderer:
         record_key: str = "",
         *,
         footer_lines: list[str] | None = None,
+        top_html: str = "",
     ) -> RenderResult:
         """渲染 Markdown 正文卡片（"画像"系列玩法用）。"""
         return await self._run(
@@ -2941,6 +3087,7 @@ class CardRenderer:
                 source,
                 scoped,
                 footer_lines=footer_lines,
+                top_html=top_html,
             ),
             str(source or ""),
             ctx,
@@ -2978,6 +3125,7 @@ __all__ = [
     "neutralize_jinja",
     "normalize_theme",
     "normalize_theme_choice",
+    "pairings_panel_html",
     "pick_theme",
     "radar_geometry",
     "resolve_font_source",

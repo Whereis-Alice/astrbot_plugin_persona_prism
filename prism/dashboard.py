@@ -174,6 +174,10 @@ FIELD_HINTS: dict[str, dict[str, str]] = {
         "label": "挑几场对话",
         "hint": "上面的开关打开时，最多让模型圈出几场对话。太多会让卡片变得冗长。",
     },
+    "match.rank_size": {
+        "label": "缘分榜人数",
+        "hint": "「棱镜姻缘」卡片顶部的缘分榜列几个人。第一名会占一整块大版面，其余排在下面当备选。名单和匹配度由本地互动次数算出，模型只负责把它写成人话。",
+    },
     "profile.type_tag": {
         "label": "人格类型徽章",
         "hint": "在卡片头衔旁边加一枚四字母人格代号。官方译名最中规中矩，玩梗版和二次元版更适合娱乐群。选「关闭」就不显示。",
@@ -221,6 +225,7 @@ GROUP_TITLES: dict[str, dict[str, str]] = {
     "persona_clone": {"label": "人格克隆", "icon": "mask"},
     "love": {"label": "恋爱诊断", "icon": "heart"},
     "dialogue": {"label": "对话理解", "icon": "users"},
+    "match": {"label": "棱镜姻缘", "icon": "knot"},
     "profile": {"label": "人格徽章", "icon": "tag"},
     "persona": {"label": "人格联动", "icon": "prompt"},
     "behavior": {"label": "行为", "icon": "sliders"},

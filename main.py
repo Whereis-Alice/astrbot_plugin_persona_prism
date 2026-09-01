@@ -36,6 +36,7 @@ from .prism import (
     dialogue,
     history,
     love,
+    pairing,
     persona_link,
     scanning,
     scenes,
@@ -44,7 +45,7 @@ from .prism import (
 from .prism.analyzer import AnalyzeError, PrismAnalyzer
 from .prism.cards import CardContext, CardRenderer, RenderResult
 from .prism.config import ConfigError, PrismConfig
-from .prism.models import CorpusBundle, CorpusMessage, MemberProfile, PortraitRecord
+from .prism.models import CorpusBundle, CorpusMessage, MemberProfile, Pairing, PortraitRecord
 from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
@@ -266,6 +267,10 @@ def _fmt_ts(ts: Any, pattern: str = "%Y-%m-%d") -> str:
     return ""
 
 
+#: 「和谁最搭」这一类玩法。只有它们会在卡片上出现缘分榜。
+_MATCH_KEYS = frozenset({"match", "legacy_match"})
+
+
 @dataclass(slots=True)
 class _DialogueScope:
     """一次分析所依据的「群聊现场」。
@@ -277,6 +282,8 @@ class _DialogueScope:
     rows: list[dict[str, Any]] = field(default_factory=list)
     names: dict[str, str] = field(default_factory=dict)
     chain_scenes: list[chain.ChainScene] = field(default_factory=list)
+    #: 这批群聊里数出来的关系层事实。缘分榜从这里取数。
+    signals: dialogue.SocialSignals | None = None
 
     def window_hint(self) -> Callable[[str, int], list[dict[str, Any]]] | None:
         """证供还原时用的取景函数。没有模型场次就返回 None，让 scenes 走本地切法。"""
@@ -1224,6 +1231,19 @@ class PersonaPrismStar(Star):
             )
         return filled
 
+    def _pairings_of(
+        self,
+        scope: _DialogueScope | None,
+        bundle: CorpusBundle,
+    ) -> list[Pairing]:
+        """算出这个人的缘分榜。有引用/@ 关系就用它排名，什么都没有才退回念名字。"""
+        limit = max(1, self.config.int_of("match.rank_size"))
+        if scope is not None and scope.signals is not None and scope.signals.links:
+            ranked = pairing.rank_pairings(scope.signals.links, limit=limit)
+            if ranked:
+                return ranked
+        return pairing.pairings_from_mentions(bundle.partners, limit=limit)
+
     async def _dialogue_context(
         self,
         event: AstrMessageEvent,
@@ -1299,14 +1319,16 @@ class PersonaPrismStar(Star):
                 max_lines=max_lines,
                 self_id=self_id,
             )
+        #: 关系层事实始终算一遍：提示词里那一段可以按开关省掉，但缘分榜要用它排名。
+        scope.signals = dialogue.social_signals(
+            rows,
+            target_id,
+            names=names,
+            self_id=self_id,
+        )
         social = ""
         if self.config.bool_of("dialogue.social_signals"):
-            social = dialogue.social_signals(
-                rows,
-                target_id,
-                names=names,
-                self_id=self_id,
-            ).to_prompt_block()
+            social = scope.signals.to_prompt_block()
         return block, social, scope
 
     async def _execute(self, event: AstrMessageEvent, spec: PromptSpec | None):
@@ -1455,6 +1477,19 @@ class PersonaPrismStar(Star):
                     target_name=target_name,
                 )
 
+            #: 姻缘系列的配对结果先在本地算好再交给模型 —— 否则模型只会去总结"这个人
+            #: 怎么样"，写出来和人格画像撞车（这正是 v1.5.0 之前"两张卡看不出区别"的根因）。
+            pairings: list[Pairing] = []
+            if spec.key in _MATCH_KEYS:
+                with contextlib.suppress(Exception):
+                    pairings = self._pairings_of(scope, bundle)
+                if pairings:
+                    logger.info(
+                        "[人格棱镜] 缘分榜（%s）：%s",
+                        target_name,
+                        " / ".join(f"{p.name} {p.score}%" for p in pairings),
+                    )
+
             portrait, model = await self.analyzer.analyze(
                 spec,
                 bundle,
@@ -1463,10 +1498,13 @@ class PersonaPrismStar(Star):
                 profile=profile,
                 umo=event.unified_msg_origin,
                 seed=f"{platform}:{group_id}:{target_id}:{spec.key}",
+                extra_facts=pairing.facts_block(pairings),
                 dialogue_block=dialogue_block,
                 social_block=social_block,
                 event=event,
             )
+            if pairings:
+                portrait.pairings = pairings
             with contextlib.suppress(Exception):
                 await self._restore_scenes(
                     platform,
@@ -1547,6 +1585,8 @@ class PersonaPrismStar(Star):
                     portrait.raw_text or record.text,
                     ctx,
                     record_key=record_key,
+                    # 红娘系列同样把缘分榜置顶，长文里"到底是谁"不必翻着找。
+                    top_html=cards.pairings_panel_html(portrait, ctx),
                 )
             else:
                 # 纯文本玩法（人格克隆）的产物要能整段复制，出图反而没法用。

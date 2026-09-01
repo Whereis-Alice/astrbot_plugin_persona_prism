@@ -1430,6 +1430,28 @@ function renderDrawer() {
     body.appendChild(block);
   }
 
+  if ((payload.pairings || []).length) {
+    // 缘分榜和卡片保持同一份顺序：第一名是最佳搭子，后面的是备选。
+    const block = make("div", "block");
+    block.appendChild(make("p", "block__title", "缘分榜"));
+    for (const item of payload.pairings) {
+      const row = make("div", "dimension");
+      const rowHead = make("div", "dimension__head");
+      append(rowHead, [
+        make("strong", "", item.name || "?"),
+        make("span", "bar__num", String(Math.round(Number(item.score || 0))) + "%"),
+      ]);
+      const track = make("div", "meter__track");
+      const fill = make("div", "meter__fill");
+      fill.style.width = Math.max(0, Math.min(100, Number(item.score || 0))) + "%";
+      track.appendChild(fill);
+      const note = [item.mutual ? "双向奔赴" : "单向靠近", item.note || ""].filter(Boolean).join(" · ");
+      append(row, [rowHead, track, make("p", "dimension__note", note)]);
+      block.appendChild(row);
+    }
+    body.appendChild(block);
+  }
+
   if ((payload.dimensions || []).length) {
     const block = make("div", "block");
     block.appendChild(make("p", "block__title", "维度评分"));

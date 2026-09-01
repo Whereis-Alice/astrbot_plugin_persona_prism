@@ -99,6 +99,10 @@ DEFAULTS: dict[str, dict[str, Any]] = {
         "llm_chain": True,
         "llm_chain_scenes": 5,
     },
+    "match": {
+        # 缘分榜上榜几个人：第 1 名做主角，其余当备选。
+        "rank_size": 4,
+    },
     "profile": {
         # 16 型人格徽章：off 关闭 / mbti 官方译名 / sbti 玩梗版 / acgti 二次元版。
         "type_tag": "mbti",
@@ -182,6 +186,7 @@ DASHBOARD_WRITABLE: frozenset[str] = frozenset(
         "dialogue.social_signals",
         "dialogue.llm_chain",
         "dialogue.llm_chain_scenes",
+        "match.rank_size",
         "profile.type_tag",
         "persona.use_astrbot_persona",
         "persona.persona_id",
@@ -239,6 +244,7 @@ _RANGES: dict[str, tuple[int, int]] = {
     "dialogue.max_scenes": (1, 40),
     "dialogue.max_lines": (10, 300),
     "dialogue.llm_chain_scenes": (1, 12),
+    "match.rank_size": (1, 6),
     "llm.retry_times": (0, 5),
     "collect.backfill_rounds": (0, 60),
     "collect.page_size": (20, 200),
