@@ -50,7 +50,7 @@ from .prism.prompts import PromptLibrary, PromptSpec, normalize_layout
 from .prism.store import AsyncStore, PrismStore
 
 PLUGIN_ID = "astrbot_plugin_persona_prism"
-PLUGIN_VERSION = "v1.5.0"
+PLUGIN_VERSION = "v1.5.2"
 PLUGIN_REPO = "https://github.com/Whereis-Alice/astrbot_plugin_persona_prism"
 
 #: 插件自己刷出去的固定文案特征。协议端常把机器人发出去的消息当群消息回灌，
@@ -123,7 +123,30 @@ BUILTIN_COMMANDS = (
     "找对象",
 )
 
-#: 本插件自己的所有指令。语料采集时会把这些消息剔除，免得画像里全是指令回声。
+#: 卡片上印的玩法名同时注册成指令别名。群友看到卡片标题写着「群友姻缘」，照着发一遍
+#: 就该有反应，而不是被迫回头翻帮助卡才知道真名叫「棱镜姻缘」。
+#: 这些名字都比较长且带定语，实测不会和生态里的常见指令撞车。
+COMMAND_ALIASES: dict[str, tuple[str, ...]] = {
+    "棱镜画像": ("人格画像",),
+    "棱镜赞赏": ("群友赞赏",),
+    "棱镜锐评": ("群友锐评",),
+    "棱镜姻缘": ("群友姻缘",),
+    "棱镜克隆": ("人格克隆",),
+}
+
+#: 别名摊平成一张表：语料过滤、「保留指令」校验都要认它们。
+ALIAS_COMMANDS: tuple[str, ...] = tuple(
+    alias for aliases in COMMAND_ALIASES.values() for alias in aliases
+)
+
+
+def _alias_of(command: str) -> set[str]:
+    """给 filter.command 用的别名集合。别名表只此一份，免得装饰器和过滤表写不一样。"""
+    return set(COMMAND_ALIASES.get(command, ()))
+
+
+#: 本插件自己的所有指令（含上面的别名）。语料采集时会把这些消息剔除，
+#: 免得画像里全是指令回声。
 OWN_COMMANDS = (
     "棱镜画像",
     "棱镜赞赏",
@@ -157,6 +180,7 @@ OWN_COMMANDS = (
     "切换人格",
     "恢复人格",
     "今日人设",
+    *ALIAS_COMMANDS,
 )
 
 #: 「画像」系列（兼容上游）用到的提示词 key。
@@ -166,6 +190,17 @@ LEGACY_KEYS: dict[str, str] = {
     "负画像": "legacy_negative",
     "克隆人格": "legacy_clone",
     "找对象": "legacy_match",
+}
+
+#: 帮助卡里棱镜系列每条指令的一句话说明。
+#: 不直接用提示词的 label（卡片标题），因为那些名字现在同时是指令别名，
+#: 摆在描述位会和左边的指令名重复，读起来像复读机。
+PRISM_HELP_HINTS: dict[str, str] = {
+    "portrait": "综合人格卡：评分 + 雷达图 + 聊天现场",
+    "praise": "只挑优点的夸夸卡，适合发给寿星",
+    "roast": "毒舌但不越界的锐评卡",
+    "match": "谁和 TA 最搭：缘分榜 + 破冰指南",
+    "clone": "把说话风格提炼成一段人格提示词",
 }
 
 #: 可以拿来做人格克隆的记录类型，按优先级排列。
@@ -225,11 +260,17 @@ def _page_ids(messages: Any) -> set[str]:
     """一页群历史里所有消息的唯一标识（prism.history 的薄封装）。"""
     return history.page_ids(messages)
 
+
 def _strip_command(text: str, command: str) -> str:
-    """去掉指令前缀（含唤醒前缀符）后剩下的参数部分。"""
+    """去掉指令前缀（含唤醒前缀符）后剩下的参数部分。
+
+    别名要和本名一样剥干净：否则「群友姻缘 10001」里的指令名会被当成参数，
+    解析对象和天数时全是噪音。
+    """
     body = (text or "").lstrip(_PREFIX_CHARS)
-    if command and body.startswith(command):
-        body = body[len(command) :]
+    for name in (command, *COMMAND_ALIASES.get(command, ())):
+        if name and body.startswith(name):
+            return body[len(name) :].strip()
     return body.strip()
 
 
@@ -2254,31 +2295,31 @@ class PersonaPrismStar(Star):
 
     # ------------------------------------------------------------------ 指令
 
-    @filter.command("棱镜画像")
+    @filter.command("棱镜画像", alias=_alias_of("棱镜画像"))
     async def cmd_portrait(self, event: AstrMessageEvent):
         """给群友生成一份结构化人格画像卡片。"""
         async for result in self._execute(event, self.library.get("portrait")):
             yield result
 
-    @filter.command("棱镜赞赏")
+    @filter.command("棱镜赞赏", alias=_alias_of("棱镜赞赏"))
     async def cmd_praise(self, event: AstrMessageEvent):
         """只挑优点，输出一份夸夸卡。"""
         async for result in self._execute(event, self.library.get("praise")):
             yield result
 
-    @filter.command("棱镜锐评")
+    @filter.command("棱镜锐评", alias=_alias_of("棱镜锐评"))
     async def cmd_roast(self, event: AstrMessageEvent):
         """毒舌但不越界的锐评卡。"""
         async for result in self._execute(event, self.library.get("roast")):
             yield result
 
-    @filter.command("棱镜姻缘")
+    @filter.command("棱镜姻缘", alias=_alias_of("棱镜姻缘"))
     async def cmd_match(self, event: AstrMessageEvent):
         """基于互动数据推测最合适的群内搭子。"""
         async for result in self._execute(event, self.library.get("match")):
             yield result
 
-    @filter.command("棱镜克隆")
+    @filter.command("棱镜克隆", alias=_alias_of("棱镜克隆"))
     async def cmd_clone(self, event: AstrMessageEvent):
         """把群友的说话风格提炼成一段可直接粘贴的人格提示词。"""
         async for result in self._clone_flow(event, "clone", "棱镜克隆"):
@@ -2676,7 +2717,14 @@ class PersonaPrismStar(Star):
             cards.HelpGroup(
                 name="棱镜系列",
                 desc="结构化信息卡：评分 + 雷达图 + 聊天现场证供",
-                items=[cards.HelpItem(spec.command, spec.label) for spec in prism_specs],
+                items=[
+                    cards.HelpItem(
+                        spec.command,
+                        PRISM_HELP_HINTS.get(spec.key, spec.label),
+                        aliases=COMMAND_ALIASES.get(spec.command, ()),
+                    )
+                    for spec in prism_specs
+                ],
             ),
         ]
         if love_spec is not None and self.config.bool_of("love.enabled"):
@@ -2756,11 +2804,13 @@ class PersonaPrismStar(Star):
             f"人格棱镜 {PLUGIN_VERSION} · 指令一览",
             "",
             "目标写法通用：@对方 / 回复对方的消息 / 直接跟 QQ 号，都省略就是画自己。",
+            "括号里是同一个玩法的别名，卡片标题上印的名字可以直接当指令发。",
         ]
         for group in groups:
             lines += ["", f"【{group.name}】{group.desc}"]
             for item in group.items:
-                tail = f"（{' '.join(item.aliases)}）" if item.aliases else ""
+                marks = [*item.tags, *(f"＝{alias}" for alias in item.aliases)]
+                tail = f"（{' '.join(marks)}）" if marks else ""
                 lines.append(f"  {item.command} —— {item.label}{tail}")
         lines += [
             "",
@@ -2818,7 +2868,10 @@ class PersonaPrismStar(Star):
                     ],
                 ),
             ],
-            note="棱镜系列出结构化卡片，画像系列出上游同款长文卡，两者互不影响。",
+            note=(
+                "棱镜系列出结构化卡片，画像系列出上游同款长文卡，两者互不影响。"
+                "带虚线的名字是同一个玩法的别名，照着发一样出卡。"
+            ),
         )
         ctx = CardContext(
             title="人格棱镜 · 指令速查",

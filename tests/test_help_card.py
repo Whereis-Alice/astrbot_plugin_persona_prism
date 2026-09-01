@@ -85,6 +85,26 @@ def test_help_card_html_renders_every_section() -> None:
     assert "语料从哪来" in html
 
 
+def test_help_card_separates_tags_from_aliases() -> None:
+    """权限标记和「换个名字也能发」是两回事，视觉上必须分得开。"""
+    card = _card()
+    card.groups[0].items[0].aliases = ("人格画像",)
+    html = cards.build_help_card_html(card, _ctx())
+    assert '<span class="al">' in html
+    assert '<span class="tg">管理员</span>' in html
+    assert "人格画像" in html
+    #: 别名胶囊用虚线描边区分，样式丢了就会被误读成权限标记。
+    assert "border: 1px dashed var(--cat)" in html
+
+
+def test_help_card_escapes_alias_text() -> None:
+    card = _card()
+    card.groups[0].items[0].aliases = ("<b>x</b>",)
+    html = cards.build_help_card_html(card, _ctx())
+    assert "<b>x</b>" not in html
+    assert "&lt;b&gt;x&lt;/b&gt;" in html
+
+
 def test_help_card_spectrum_width_follows_item_count() -> None:
     html = cards.build_help_card_html(_card(), _ctx())
     #: 两条指令的分类占 2 份宽，一条的占 1 份 —— 体量差异要看得见。

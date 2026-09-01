@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import ast
 import time
+from pathlib import Path
 
 import pytest
 
@@ -26,9 +28,21 @@ def test_plugin_identity_is_renamed_everywhere():
     assert "portrayal" not in main.PLUGIN_ID
 
 
+def test_plugin_version_matches_metadata():
+    """版本号出现在帮助卡和 WebUI 状态条上，和 metadata 对不上就是在骗用户。"""
+    meta = (Path(main.__file__).parent / "metadata.yaml").read_text(encoding="utf-8")
+    declared = next(
+        line.split(":", 1)[1].strip()
+        for line in meta.splitlines()
+        if line.startswith("version:")
+    )
+    assert declared == main.PLUGIN_VERSION
+
+
 def test_own_commands_has_no_duplicates():
-    assert len(main.OWN_COMMANDS) == 32
-    assert len(set(main.OWN_COMMANDS)) == 32
+    # 32 条真指令 + 5 条卡片标题别名
+    assert len(main.OWN_COMMANDS) == 37
+    assert len(set(main.OWN_COMMANDS)) == 37
 
 
 def test_builtin_commands_are_a_subset_of_own_commands():
@@ -54,7 +68,12 @@ LOVE_COMMANDS = frozenset({"恋爱诊断", "恋爱诊断榜"})
 def test_every_command_shares_the_prism_prefix():
     # 棱镜系列统一前缀是「不和其他插件抢指令」的关键；只有兼容指令例外。
     for command in main.OWN_COMMANDS:
-        assert command.startswith("棱镜") or command in COMPAT_COMMANDS or command in LOVE_COMMANDS
+        assert (
+            command.startswith("棱镜")
+            or command in COMPAT_COMMANDS
+            or command in LOVE_COMMANDS
+            or command in main.ALIAS_COMMANDS
+        )
 
 
 def test_compat_commands_are_all_registered_as_own():
@@ -68,6 +87,79 @@ def test_legacy_keys_map_to_builtin_prompts():
         assert spec is not None, key
         assert spec.command == command
         assert spec.builtin is True
+
+
+def test_alias_table_points_at_real_commands():
+    # 别名的来源是卡片标题，所以键必须是真指令，值必须已经登记进 OWN_COMMANDS。
+    for command, aliases in main.COMMAND_ALIASES.items():
+        assert command in main.BUILTIN_COMMANDS, command
+        assert aliases, command
+        for alias in aliases:
+            assert alias in main.OWN_COMMANDS, alias
+
+
+def test_aliases_do_not_shadow_a_real_command():
+    real = set(main.BUILTIN_COMMANDS) | (set(main.OWN_COMMANDS) - set(main.ALIAS_COMMANDS))
+    assert not (set(main.ALIAS_COMMANDS) & real)
+    assert len(main.ALIAS_COMMANDS) == len(set(main.ALIAS_COMMANDS))
+
+
+def test_aliases_are_the_labels_printed_on_the_cards():
+    # 整个别名机制的意义就是「卡片标题照着发也能用」，对不上就没意义了。
+    library = PromptLibrary()
+    for command, aliases in main.COMMAND_ALIASES.items():
+        spec = next(s for s in library.all_specs() if s.command == command)
+        assert spec.label in aliases, command
+
+
+def test_alias_of_reads_the_table():
+    assert main._alias_of("棱镜姻缘") == {"群友姻缘"}
+    assert main._alias_of("棱镜帮助") == set()
+
+
+def _declared_command_aliases() -> dict[str, tuple[str, ...]]:
+    """从源码里读回每个 @filter.command 实际声明的 alias。
+
+    别名表和装饰器是两处独立的写法，只有源码级比对才能拦住「表里加了、装饰器忘了」
+    这种半吊子改动 —— 那种情况下指令根本不会被注册，测试却全绿。
+    """
+    source = (Path(main.__file__)).read_text(encoding="utf-8")
+    found: dict[str, tuple[str, ...]] = {}
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        if not (isinstance(target, ast.Attribute) and target.attr == "command"):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        command = node.args[0].value
+        for keyword in node.keywords:
+            if keyword.arg != "alias":
+                continue
+            call = keyword.value
+            # 写法固定是 _alias_of("指令名")，顺手校验参数没写串。
+            assert isinstance(call, ast.Call), command
+            assert isinstance(call.func, ast.Name) and call.func.id == "_alias_of", command
+            assert [arg.value for arg in call.args] == [command], command
+            found[command] = main.COMMAND_ALIASES.get(command, ())
+    return found
+
+
+def test_every_aliased_command_declares_it_on_the_decorator():
+    assert _declared_command_aliases() == main.COMMAND_ALIASES
+
+
+def test_prism_help_hints_cover_the_prism_series():
+    library = PromptLibrary()
+    keys = {
+        spec.key
+        for spec in library.all_specs()
+        if spec.builtin and spec.key not in main.LEGACY_KEYS.values() and spec.key != "love"
+    }
+    assert set(main.PRISM_HELP_HINTS) == keys
+    for hint in main.PRISM_HELP_HINTS.values():
+        assert hint.strip()
 
 
 def test_clone_kinds_cover_both_series():
@@ -174,6 +266,13 @@ def test_strip_command_does_not_cut_other_commands():
     assert main._strip_command("棱镜锐评 x", "棱镜画像") == "棱镜锐评 x"
 
 
+def test_strip_command_also_strips_aliases():
+    # AstrBot 的指令过滤器不会改写 event 文本，别名必须由我们自己剥掉。
+    assert main._strip_command("群友姻缘 10001", "棱镜姻缘") == "10001"
+    assert main._strip_command("/人格画像 @小明", "棱镜画像") == "@小明"
+    assert main._strip_command("人格克隆", "棱镜克隆") == ""
+
+
 # ---------------------------------------------------------------------------
 # _fmt_ts
 # ---------------------------------------------------------------------------
@@ -206,6 +305,13 @@ def test_is_own_command_matches_with_and_without_prefix():
     assert check("/棱镜统计") is True
     assert check("！棱镜帮助") is True
     assert check("   棱镜主题 ink") is True
+
+
+def test_is_own_command_covers_the_card_title_aliases():
+    # 别名也是我们发出去的指令回声，不剔掉的话画像里全是「群友姻缘」。
+    check = main.PersonaPrismStar._is_own_command
+    assert check("群友姻缘 @小明") is True
+    assert check("/人格画像") is True
 
 
 def test_is_own_command_ignores_normal_chat():

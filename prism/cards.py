@@ -2615,10 +2615,15 @@ _HELP_CSS = """
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   font-size: 15.5px; font-weight: 600; color: var(--ink-strong);
 }
-.help-cmd .al {
+.help-cmd .tg {
   font-size: 12.5px; font-weight: 400; padding: 2px 7px; border-radius: 999px;
   background: var(--chip-bg); color: var(--ink-dim); border: var(--chip-border);
 }
+.help-cmd .al {
+  font-size: 12.5px; font-weight: 500; padding: 2px 8px; border-radius: 999px;
+  color: var(--cat); border: 1px dashed var(--cat); background: none;
+}
+.help-cmd .al i { font-style: normal; opacity: .6; margin-right: 3px; }
 .help-cmd .d { margin-top: 3px; font-size: 13.5px; line-height: 1.55; color: var(--ink-dim); }
 .help-foot {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
@@ -2636,6 +2641,9 @@ class HelpItem:
 
     command: str
     label: str = ""
+    #: 权限或属性标记（如「管理员」），渲染成灰底小胶囊。
+    tags: tuple[str, ...] = ()
+    #: 同一玩法的别名指令，渲染成虚线胶囊，提示这个名字也能直接发。
     aliases: tuple[str, ...] = ()
 
 
@@ -2747,8 +2755,9 @@ def build_help_card_html(card: HelpCard, ctx: CardContext) -> str:
         wide = widths[pos]
         rows: list[str] = []
         for order, item in enumerate(group.items, start=1):
-            chips = "".join(
-                f'<span class="al">{_esc(alias)}</span>' for alias in item.aliases if alias
+            chips = "".join(f'<span class="tg">{_esc(tag)}</span>' for tag in item.tags if tag)
+            chips += "".join(
+                f'<span class="al"><i>=</i>{_esc(alias)}</span>' for alias in item.aliases if alias
             )
             desc = f'<div class="d">{_esc(item.label)}</div>' if item.label else ""
             rows.append(
